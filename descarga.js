@@ -12,13 +12,20 @@
 //   aún abiertas), bytesVuelo (recibidos por la red y todavía sin escribir), pctEnsamblado.
 
 import { esperaProgresiva, SIN_DATOS_MS } from './api.js';
-import { ErrorNombre, ErrorPartes } from './escritor.js';
+import { ErrorDisco, ErrorNombre, ErrorPartes } from './escritor.js';
 import { rangoTrozo } from './wire.js';
 
 export const TRABAJADORES_POR_DEFECTO = 4;
 // El motor admite 50 peticiones por segundo sostenidas por compartición (contando estado e informes).
 // Con archivos o trozos muy pequeños se podría superar: aquí se frena antes de que el motor responda 429.
 const PETICIONES_POR_SEGUNDO = 40;
+
+// Vigías. Nada de esto debería saltar nunca; están para que una descarga desatendida no se quede
+// parada para siempre por algo que no avisa.
+export const PLAZO_LISTO_MS = 30000;        // un trabajador recién creado que no dice «listo» en este tiempo se repone
+export const MARGEN_TRABAJO_MS = 30000;     // silencio de un trabajador con un encargo, por encima del vigía de red, antes de darlo por muerto
+export const PLAZO_ESCRITURA_MS = 300000;   // abrir, escribir o cerrar en la carpeta: 5 minutos sin terminar es un cuelgue
+const BYTES_POR_SEGUNDO_MINIMOS = 4 * 1048576; // al cerrar o unir, el plazo crece con el tamaño (un antivirus puede repasar el archivo entero)
 
 function liberar(buf) {
   try {
@@ -30,7 +37,8 @@ export const acotarTrabajadores = (n) => Math.max(1, Math.min(8, Math.floor(Numb
 
 export class Descarga {
   // op: { claveBase, credencial, shareIdTexto, shareId, tamTrozo, escritor, trabajadores, sinDatosMs,
-  //       urlTrabajador, origen, fijo, alCambiar(), alEvento(tipo, datos) }
+  //       urlTrabajador, origen, fijo, alCambiar(), alEvento(tipo, datos),
+  //       plazoListoMs, plazoTrabajoMs, plazoEscrituraMs (vigías; solo se cambian en las pruebas) }
   // `origen` es '' en el modo clásico. En el modo fijo (`fijo`) es el origen del motor y puede cambiar
   // con cambiarOrigen(); además se avisa con el evento «seguir» cuando conviene preguntar dónde está.
   constructor(op) {
@@ -56,6 +64,9 @@ export class Descarga {
     this.fallosTrozo = new Map();
     this.fallosTrabajador = 0;
     this.fallosRed = 0;             // intentos seguidos que acabaron sin respuesta del motor (fallo de red, no un estado HTTP)
+    this.plazoListo = op.plazoListoMs || PLAZO_LISTO_MS;
+    this.plazoTrabajo = op.plazoTrabajoMs || (op.sinDatosMs || SIN_DATOS_MS) + MARGEN_TRABAJO_MS;
+    this.plazoEscritura = op.plazoEscrituraMs || PLAZO_ESCRITURA_MS;
     this.salidas = [];              // instantes de las últimas peticiones (para el límite por segundo)
     this.tCupo = 0;
     // Contadores para la interfaz y las pruebas.
@@ -130,7 +141,7 @@ export class Descarga {
     this.tCupo = 0;
     this.quitarPuerta();
     this.descartarTodo();
-    for (const t of this.trabajadores) t.w.terminate();
+    for (const t of this.trabajadores) { clearTimeout(t.tListo); t.w.terminate(); }
     this.trabajadores = [];
   }
 
@@ -146,7 +157,9 @@ export class Descarga {
   asegurarTrabajadores() {
     while (this.trabajadores.length < this.n) {
       const w = new Worker(this.op.urlTrabajador, { type: 'module', name: 'lata-trabajador' });
-      const t = { w, trabajo: null, listo: false };
+      const t = { w, trabajo: null, listo: false, tListo: 0 };
+      // Vigía: si el trabajador no llega a decir «listo» (su módulo no termina de cargar), se repone.
+      t.tListo = setTimeout(() => { t.tListo = 0; if (!t.listo) this.alFalloTrabajador(t); }, this.plazoListo);
       w.onmessage = (ev) => this.alMensaje(t, ev.data);
       w.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); this.alFalloTrabajador(t); };
       w.postMessage({
@@ -162,6 +175,7 @@ export class Descarga {
     const n = this.trabajadores.indexOf(t);
     if (n < 0) return;
     this.trabajadores.splice(n, 1);
+    clearTimeout(t.tListo);
     try { t.w.terminate(); } catch { /* ya muerto */ }
     this.fallosTrabajador++;
     const trabajo = [...this.trabajos.values()].find((x) => x.trabajador === t);
@@ -175,6 +189,8 @@ export class Descarga {
   alMensaje(t, m) {
     if (m.tipo === 'listo') {
       t.listo = true;
+      clearTimeout(t.tListo);
+      t.tListo = 0;
       this.bombear();
       return;
     }
@@ -184,6 +200,7 @@ export class Descarga {
       return;
     }
     if (m.tipo === 'recibido') {
+      this.armarVigia(trabajo);     // sigue vivo: llegan datos
       trabajo.recibido += m.bytes;
       trabajo.u.a.bytesVuelo += m.bytes;
       this.bytesRed += m.bytes;
@@ -213,6 +230,36 @@ export class Descarga {
     if (this.puerta) this.abrirPuerta();
     else this.bombear();
     this.cambio();
+  }
+
+  // Vigía de cada encargo. El trabajador ya corta por su cuenta una petición sin datos y avisa; esto
+  // cubre que el propio trabajador muera sin avisar (o se quede colgado): si pasa demasiado tiempo sin
+  // ninguna noticia suya, se cierra, se crea otro y el trozo se vuelve a pedir.
+  armarVigia(t) {
+    clearTimeout(t.vigia);
+    t.vigia = setTimeout(() => {
+      t.vigia = 0;
+      if (this.trabajos.get(t.id) === t && t.fase === 'red') this.alFalloTrabajador(t.trabajador);
+    }, this.plazoTrabajo);
+  }
+
+  // Vigía de la carpeta: una operación de escritura que no termina en su plazo se da por colgada y
+  // sale como un fallo de disco de causa «Plazo» (pasajero: la sesión lo reintenta sola).
+  // Devuelve { promesa, latido() }: latido() reinicia la cuenta (para operaciones que van avisando).
+  conPlazo(promesa, donde, bytes = 0) {
+    const ms = this.plazoEscritura + Math.ceil((bytes / BYTES_POR_SEGUNDO_MINIMOS) * 1000);
+    let t = 0;
+    let vencer = null;
+    const armar = () => {
+      clearTimeout(t);
+      t = setTimeout(() => vencer(new ErrorDisco({ name: 'Plazo', message: `sin respuesta en ${Math.round(ms / 1000)} s` }, donde)), ms);
+    };
+    const plazo = new Promise((_, mal) => { vencer = mal; });
+    armar();
+    const carrera = Promise.race([promesa, plazo]);
+    const limpiar = () => clearTimeout(t);
+    carrera.then(limpiar, limpiar);
+    return { promesa: carrera, latido: armar };
   }
 
   /* ---------------------------------------------------------------- reparto */
@@ -277,7 +324,8 @@ export class Descarga {
     };
     for (let i = 0; i < g.n; i++) u.pendientes.push(g.primer + i);
     // Se abre ya, en paralelo con la primera petición. Si falla, se sabe antes de malgastar un trozo.
-    u.flujo = this.op.escritor.abrirUnidad(a, k);
+    u.abierto = this.op.escritor.abrirUnidad(a, k);     // tal cual, para poder abortarlo aunque llegue tarde
+    u.flujo = this.conPlazo(u.abierto, 'abrir').promesa;
     u.flujo.catch((e) => { if (!u.cancelada) this.falloEscritura(u, e); });
     a.activas.add(k);
     this.unidades.push(u);
@@ -287,8 +335,9 @@ export class Descarga {
   asignar(trabajador, u, i) {
     const a = u.a;
     const r = rangoTrozo(a.tam, this.op.tamTrozo, i);
-    const t = { id: ++this.sec, u, i, trabajador, generacion: this.generacion, recibido: 0, longitud: r.longitud, fase: 'red' };
+    const t = { id: ++this.sec, u, i, trabajador, generacion: this.generacion, recibido: 0, longitud: r.longitud, fase: 'red', vigia: 0 };
     this.trabajos.set(t.id, t);
+    this.armarVigia(t);
     u.enVuelo.add(i);
     trabajador.trabajo = t.id;
     this.salidas.push(performance.now());
@@ -298,6 +347,8 @@ export class Descarga {
   // Quita el encargo y deja libre a su trabajador. No reparte: quien llama decide cuándo.
   retirar(t) {
     if (this.trabajos.get(t.id) !== t) return false;
+    clearTimeout(t.vigia);
+    t.vigia = 0;
     this.trabajos.delete(t.id);
     if (t.trabajador.trabajo === t.id) t.trabajador.trabajo = null;
     t.u.a.bytesVuelo = Math.max(0, t.u.a.bytesVuelo - t.recibido);
@@ -316,6 +367,8 @@ export class Descarga {
 
   async alHecho(t, datos) {
     t.fase = 'escribiendo';
+    clearTimeout(t.vigia);
+    t.vigia = 0;
     const u = t.u;
     const a = u.a;
     if (t.generacion === this.generacion) { this.nivel = 0; this.sonda = false; }
@@ -327,7 +380,7 @@ export class Descarga {
       if (!u.cancelada) {
         const flujo = await u.flujo;
         if (!u.cancelada) {
-          await flujo.escribir((t.i - u.primer) * this.op.tamTrozo, datos);
+          await this.conPlazo(flujo.escribir((t.i - u.primer) * this.op.tamTrozo, datos), 'escribir').promesa;
           escrito = !u.cancelada;
         }
       }
@@ -352,7 +405,7 @@ export class Descarga {
     u.estado = 'cerrando';
     try {
       const flujo = await u.flujo;
-      await flujo.cerrar(); // incluye la comprobación del tamaño
+      await this.conPlazo(flujo.cerrar(), 'cerrar', u.bytes).promesa; // incluye la comprobación del tamaño
     } catch (e) {
       if (!u.cancelada) this.falloEscritura(u, e);
       return;
@@ -402,7 +455,11 @@ export class Descarga {
       a.pctEnsamblado = 0;
       this.cambio();
       try {
-        await this.op.escritor.ensamblar(a, (p) => { a.pctEnsamblado = p; this.cambio(); });
+        // El plazo cuenta desde el último avance, no desde el principio: unir un archivo grande lleva su tiempo.
+        let latido = () => {};
+        const union = this.conPlazo(this.op.escritor.ensamblar(a, (p) => { latido(); a.pctEnsamblado = p; this.cambio(); }), 'ensamblar', a.tam);
+        latido = union.latido;
+        await union.promesa;
         if (a.estado === 'ensamblando') this.completar(a);
       } catch (e) {
         if (a.estado === 'ensamblando') a.estado = 'cola';
@@ -540,7 +597,7 @@ export class Descarga {
     if (u.cancelada) return;
     u.cancelada = true;
     for (const t of [...this.trabajos.values()]) if (t.u === u && t.fase === 'red') this.cancelarTrabajo(t, false);
-    Promise.resolve(u.flujo).then((f) => f.abortar(), () => {});
+    Promise.resolve(u.abierto).then((f) => f.abortar(), () => {});
     const n = this.unidades.indexOf(u);
     if (n >= 0) this.unidades.splice(n, 1);
     u.a.activas.delete(u.k);

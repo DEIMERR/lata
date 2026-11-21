@@ -9,7 +9,8 @@
 //   otra-pestana  la misma descarga ya está abierta en otra pestaña de este navegador
 //   listo         manifiesto cargado, falta elegir carpeta
 //   permiso       hay carpeta recordada pero el navegador pide confirmar el permiso (hace falta un clic)
-//   preparando    revisando lo que ya hay en la carpeta (solo lectura hasta saber que no hay choques)
+//   preparando    revisando lo que ya hay en la carpeta (solo lectura hasta saber que no hay choques);
+//                 también, con `espera` de motivo «disco», aguardando para reintentar sola una escritura fallida
 //   colision      en la carpeta hay archivos ajenos con el mismo nombre y otro tamaño: se pregunta → colision
 //   descargando   en marcha; `espera` indica si está esperando al emisor y por qué
 //   pausado       en pausa por la persona
@@ -36,6 +37,30 @@ const INFORME_REPOSO_MS = 60000;  // sin cambios, un latido por minuto
 const SONDEO_ESTADO_MS = 30000;   // cada cuánto se mira si el manifiesto cambió
 const VENTANA_MS = 10000;         // ventana móvil de la velocidad
 const PUNTERO_MIN_MS = 900;       // modo fijo: como mucho una consulta al punto de encuentro por segundo
+
+// Un manifiesto que no se autentica (un 200 con un cuerpo que no es del emisor) solo da el enlace por
+// no válido al abrir, sin que este navegador sepa nada de la compartición, y tras tantas respuestas así.
+export const MANIFIESTO_AJENO_MAX = 5;
+// Fallos de escritura: causas que necesitan a la persona (disco lleno, permiso retirado, carpeta
+// desaparecida). Cualquier otra se da por pasajera (un antivirus o la sincronización con la nube
+// tienen el archivo cogido) y se reintenta sola.
+export const DISCO_DEFINITIVO = ['QuotaExceededError', 'NotAllowedError', 'SecurityError', 'NotFoundError'];
+export const DISCO_REINTENTOS = 5;      // reintentos seguidos (2, 4, 8, 16 y 30 s) antes de pedir atención
+export const DISCO_LENTO_S = 120;       // ya en la fase «disco», se sigue probando sola cada tanto
+
+export const esDiscoPasajero = (causa) => !DISCO_DEFINITIVO.includes(causa);
+
+// ¿Un manifiesto ilegible da el enlace por no válido? Solo al abrir (a mitad de descarga, nunca) y:
+//   - si es del emisor pero no cumple el protocolo, enseguida: esperar no lo arregla;
+//   - si no se autentica, solo cuando nada indica que el enlace sea bueno (`probado`: este navegador
+//     ya abrió antes una lista con él, o el puntero del modo fijo se abrió con él) y se ha repetido
+//     MANIFIESTO_AJENO_MAX veces. Con un secreto equivocado el motor responde 401, no esto.
+export function manifiestoFatal({ autentico, hayManifiesto, probado, veces }) {
+  if (hayManifiesto) return false;
+  if (autentico) return true;
+  if (probado) return false;
+  return veces >= MANIFIESTO_AJENO_MAX;
+}
 
 const colator = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
 
@@ -110,6 +135,12 @@ export class Sesion {
     this.trozosRechazados = 0;
     // Modo fijo (sección 10). `fijo` es null en el modo clásico.
     //   { encuentro, id (16 bytes), idTexto, clave, seq (mayor visto), pidiendo, ultima, consultas }
+    this.reintentosDisco = 0;         // fallos de escritura pasajeros seguidos (se pone a cero al cerrar una unidad)
+    this.reintentosAuto = 0;          // veces que la página ha reintentado sola tras un fallo de escritura
+    this.esperaDisco = null;          // { motivo: 'disco', hasta, segundos, causa }: cuenta atrás del reintento automático
+    this.turnoDisco = 0;              // cambia con cada fallo o reinicio: un reintento pendiente de otro turno no hace nada
+    this.atendiendoDisco = false;
+    this.relevos = 0;                 // veces que esta pestaña ha tomado el relevo de otra que se cerró
     this.fijo = null;
     this.origen = '';                 // origen del motor; '' = el de la propia página (modo clásico)
     this.cambiosOrigen = 0;           // veces que se ha seguido al motor a otra dirección
@@ -144,6 +175,7 @@ export class Sesion {
   // Lo que la interfaz enseña como «esperando al emisor»: { motivo, hasta } o null.
   get espera() {
     if (this.esperaCarga) return this.esperaCarga;
+    if (this.esperaDisco && ['preparando', 'disco'].includes(this.fase)) return this.esperaDisco;
     if (this.esperaManifiesto && ['descargando', 'preparando'].includes(this.fase)) return this.esperaManifiesto;
     if (this.fase === 'descargando' && this.descarga && this.descarga.puerta) return this.descarga.puerta;
     return null;
@@ -203,7 +235,20 @@ export class Sesion {
           return candado ? new Promise(() => {}) : undefined; // se retiene mientras viva la pestaña
         }).catch(() => res(true));
       });
-      if (!libre) { this.ponerFase('otra-pestana'); return false; }
+      if (!libre) {
+        // Otra pestaña lleva esta descarga. Se espera a que la cierre (o suelte el relevo) y entonces
+        // esta lo toma sola y sigue, sin ningún clic: la petición queda en cola hasta que haya sitio.
+        this.ponerFase('otra-pestana');
+        await new Promise((res) => {
+          navigator.locks.request('lata-' + enlace.shareIdTexto, () => {
+            res();
+            return new Promise(() => {}); // desde ahora la lleva esta pestaña
+          }).catch(() => res());
+        });
+        if (this.fase !== 'otra-pestana') return false;
+        this.relevos++;
+        this.ponerFase('cargando');
+      }
     }
 
     try {
@@ -388,6 +433,8 @@ export class Sesion {
     this.motivoInvalido = motivo;
     this.esperaCarga = null;
     this.esperaManifiesto = null;
+    this.esperaDisco = null;
+    this.turnoDisco++;
     this.colision = null;
     if (this.descarga) this.descarga.detener();
     this.soltarCarpeta();
@@ -411,9 +458,18 @@ export class Sesion {
     }
   }
 
-  // Pide y abre el manifiesto. Reintenta sin límite mientras el fallo sea de red o de espera.
+  // ¿Hay algo que diga que este enlace es bueno? Este navegador ya abrió una lista con él (o tiene una
+  // carpeta o una descarga terminada apuntadas), o el puntero del modo fijo se abrió con su secreto.
+  enlaceProbado() {
+    const r = this.registro;
+    return !!this.fijo || this.seqMax > 0 || !!(r && (r.carpeta || r.completada));
+  }
+
+  // Pide y abre el manifiesto. Reintenta sin límite mientras el fallo sea de red o de espera, y también
+  // si llega un cuerpo que no se puede leer con la descarga ya en marcha (ver manifiestoFatal).
   async cargarManifiesto() {
     let mudanzas = this.cambiosOrigen;
+    let ilegibles = 0;
     for (let intento = 0; ;) {
       try {
         const { cuerpo } = await this.api.manifiesto();
@@ -427,7 +483,12 @@ export class Sesion {
         await this.aplicarManifiesto(m);
         return true;
       } catch (e) {
-        if (e instanceof ErrorManifiesto) return this.invalidar('manifiesto');
+        const ilegible = e instanceof ErrorManifiesto;
+        if (ilegible) {
+          ilegibles++;
+          if (manifiestoFatal({ autentico: e.autentico, hayManifiesto: !!this.manifiesto, probado: this.enlaceProbado(), veces: ilegibles })) return this.invalidar('manifiesto');
+          if (e.autentico) console.error('Lata: el emisor envió una lista de archivos que no cumple el protocolo (' + e.message + '); se vuelve a pedir.');
+        }
         const mudanza = this.esMudanza(e);
         if (e instanceof ErrorApi && e.clase === 'fatal' && !mudanza) return this.invalidar(e.codigo === 'bad_host' ? 'host' : 'revocado');
         // Tras seguir al motor a otra dirección, la espera progresiva empieza de nuevo.
@@ -443,13 +504,16 @@ export class Sesion {
         let motivo = e instanceof ErrorApi && e.codigo === 'protocolo' ? 'protocolo' : 'red';
         if (motivo === 'protocolo') console.error('Lata: el emisor respondió HTTP ' + e.estado + ' al pedir el manifiesto; no debería ocurrir.');
         if (e instanceof ErrorAntiguo) motivo = 'antiguo';
+        // Un cuerpo que no es del emisor (o que no cumple el protocolo): se descarta y se vuelve a pedir.
+        if (ilegible) motivo = e.autentico ? 'protocolo' : 'manifiesto-ajeno';
         if (e instanceof ErrorApi && e.clase === 'espera') { segundos = e.espera; motivo = e.codigo; } else segundos = esperaProgresiva(++intento);
         if (!this.manifiesto) {
           this.esperaCarga = { motivo, hasta: Date.now() + segundos * 1000, segundos };
+          this.esperasVistas.add(motivo);
           this.cambio();
-        } else if (motivo === 'antiguo') {
+        } else if (motivo === 'antiguo' || ilegible) {
           this.esperaManifiesto = { motivo, hasta: Date.now() + segundos * 1000, segundos };
-          this.esperasVistas.add('antiguo');
+          this.esperasVistas.add(motivo);
           this.cambio();
         }
         await this.dormir(segundos * 1000);
@@ -594,6 +658,7 @@ export class Sesion {
       almacen.olvidarHechos(this.enlace.shareIdTexto);
     }
     this.carpeta = carpeta;
+    this.reintentosDisco = 0;
     this.simularPermiso = false;
     this.completadaAntes = false;
     this.registro.carpeta = carpeta;
@@ -628,6 +693,8 @@ export class Sesion {
   // disco y tras responder a la pregunta de los archivos que chocan.
   async comenzar() {
     this.errorDisco = null;
+    this.esperaDisco = null;
+    this.turnoDisco++;
     this.resumen = null;
     this.colision = null;
     this.pideCarpeta = false;
@@ -684,6 +751,7 @@ export class Sesion {
       claveBase: this.claveBase, credencial: this.credencial, shareIdTexto: this.enlace.shareIdTexto, shareId: this.enlace.shareId,
       tamTrozo: this.manifiesto.tamTrozo, escritor: this.escritor, trabajadores: acotarTrabajadores(this.op.trabajadores),
       sinDatosMs: this.op.sinDatosMs, urlTrabajador: this.op.urlTrabajador, origen: this.origen, fijo: !!this.fijo,
+      plazoListoMs: this.op.plazoListoMs, plazoTrabajoMs: this.op.plazoTrabajoMs, plazoEscrituraMs: this.op.plazoEscrituraMs,
       alCambiar: () => this.cambio(), alEvento: (tipo, datos) => this.alEvento(tipo, datos),
     });
     this.descarga.establecer(this.archivos);
@@ -775,7 +843,11 @@ export class Sesion {
       case 'integridad':
         this.trozosRechazados++;
         break;
+      case 'unidad':
+        this.reintentosDisco = 0;   // se ha cerrado una unidad entera: la carpeta vuelve a dejarse escribir
+        break;
       case 'archivo-hecho':
+        this.reintentosDisco = 0;
         this.hechos.set(datos.id, datos.version);
         almacen.marcarHecho(this.enlace.shareIdTexto, datos.id, datos.version);
         break;
@@ -846,14 +918,72 @@ export class Sesion {
     this.descarga.reanudar();
   }
 
+  // No se pudo escribir en la carpeta. Si la causa necesita a la persona (disco lleno, permiso
+  // retirado, carpeta desaparecida), la descarga se detiene en la fase «disco» y espera un clic. Si
+  // parece pasajera (otro programa tiene el archivo cogido, o una escritura se quedó colgada), se
+  // reintenta sola: DISCO_REINTENTOS veces seguidas con espera progresiva y, si sigue igual, se pasa
+  // a la fase «disco» pero se sigue probando cada DISCO_LENTO_S. Lo ya guardado no se pierde nunca:
+  // cada reintento vuelve a leer la carpeta y continúa desde lo que hay.
   falloDisco(e) {
-    if (this.descarga) this.descarga.detenerPorDisco(e);
-    this.errorDisco = { causa: (e && (e.causa || e.name)) || 'Error', donde: (e && e.donde) || '', mensaje: (e && e.message) || '' };
+    if (this.atendiendoDisco || this.fase === 'invalido') return;
+    // Parar la descarga avisa a su vez de este mismo fallo: no se cuenta dos veces.
+    this.atendiendoDisco = true;
+    try { if (this.descarga) this.descarga.detenerPorDisco(e); } finally { this.atendiendoDisco = false; }
+    const err = { causa: (e && (e.causa || e.name)) || 'Error', donde: (e && e.donde) || '', mensaje: (e && e.message) || '' };
+    const turno = ++this.turnoDisco;
+    const enPausa = this.fase === 'pausado';
+    // Una escritura colgada puede haber dejado al escritor a medias: el siguiente intento usa uno nuevo,
+    // que reconstruye todo desde lo que hay en la carpeta.
+    if (err.causa === 'Plazo') this.escritor = null;
+    const pasajero = esDiscoPasajero(err.causa) && !!this.carpeta && !!this.manifiesto;
+    if (pasajero && this.reintentosDisco < DISCO_REINTENTOS) {
+      this.reintentosDisco++;
+      console.warn(`Lata: no se pudo escribir en la carpeta (${err.causa}, ${err.donde}); reintento ${this.reintentosDisco} de ${DISCO_REINTENTOS}.`);
+      this.errorDisco = null;
+      this.reintentarDiscoSolo(err, turno, esperaProgresiva(this.reintentosDisco + 1), 'preparando', enPausa);
+      return;
+    }
+    this.errorDisco = err;
+    this.esperaDisco = null;
     this.ponerFase('disco');
+    if (pasajero) this.reintentarDiscoSolo(err, turno, DISCO_LENTO_S, 'disco', enPausa);
+  }
+
+  // Espera y vuelve a empezar sola (comenzar() relee la carpeta). `fase` es la que se enseña mientras
+  // tanto: «preparando» en los primeros reintentos, «disco» en los lentos. Si entre tanto pasa
+  // cualquier otra cosa (un clic, otra carpeta, otro fallo), este intento ya no hace nada.
+  async reintentarDiscoSolo(err, turno, segundos, fase, enPausa) {
+    const unidad = this.op.discoUnidadMs || 1000;
+    this.esperaDisco = { motivo: 'disco', hasta: Date.now() + segundos * unidad, segundos, causa: err.causa };
+    this.esperasVistas.add('disco');
+    this.fase = fase;   // sin ponerFase: si ya es esa fase, hay que repintar igual
+    this.muestras = [];
+    this.velocidad = 0;
+    this.programarInforme();
+    this.cambio();
+    await this.dormir(segundos * unidad);
+    if (turno !== this.turnoDisco || this.fase !== fase) return;
+    if ((await this.consultarPermiso()) !== 'granted') {
+      // Sin permiso no hay reintento posible sin la persona: el navegador solo lo pide tras un clic.
+      if (turno !== this.turnoDisco || this.fase !== fase) return;
+      this.esperaDisco = null;
+      this.errorDisco = { causa: 'NotAllowedError', donde: err.donde, mensaje: '' };
+      this.fase = 'disco';
+      this.cambio();
+      return;
+    }
+    if (turno !== this.turnoDisco || this.fase !== fase) return;
+    this.reintentosAuto++;
+    await this.comenzar();
+    // Si la persona la tenía en pausa, sigue en pausa.
+    if (enPausa && this.fase === 'descargando') this.pausar();
   }
 
   // Desde un clic: puede hacer falta volver a pedir el permiso.
   async reintentarDisco() {
+    this.turnoDisco++;          // anula el reintento automático que estuviera esperando
+    this.esperaDisco = null;
+    this.reintentosDisco = 0;
     if ((await this.consultarPermiso()) !== 'granted') {
       let p = 'denied';
       try { p = await this.carpeta.requestPermission({ mode: 'readwrite' }); } catch { /* la carpeta ya no existe */ }
@@ -1103,6 +1233,10 @@ export class Sesion {
       colision: this.colision,
       completadaAntes: this.completadaAntes,
       esperasVistas: [...this.esperasVistas],
+      reintentosDisco: this.reintentosDisco,
+      reintentosAuto: this.reintentosAuto,
+      relevos: this.relevos,
+      trabajadoresRepuestos: this.descarga ? this.descarga.fallosTrabajador : 0,
       modo: this.fijo ? 'fijo' : 'clasico',
       origen: this.origen,
       cambiosOrigen: this.cambiosOrigen,

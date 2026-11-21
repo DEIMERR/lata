@@ -77,6 +77,8 @@ function consejoPermiso() {
 }
 
 const cuenta = (e) => (e ? Math.max(1, Math.ceil((e.hasta - Date.now()) / 1000)) : 0);
+// «45 s» o «2 min»: para cuentas atrás largas.
+const duracionCorta = (s) => (s >= 90 ? `${Math.round(s / 60)} min` : `${s} s`);
 
 /* ------------------------------------------------------------------ qué enseñar en cada fase */
 
@@ -110,6 +112,14 @@ function textoEspera(e) {
       return { titulo: 'Esperando a quien comparte', texto: `Ha llegado una dirección de su equipo más antigua que la que ya conocías. No se va a usar: se vuelve a preguntar ${en}. Si sigue igual, avisa a quien te envió el enlace.`, corto: 'Esperando a quien comparte' };
     case 'puntero-no-vale':
       return { titulo: 'Esperando a quien comparte', texto: `La dirección de su equipo que ha llegado no se puede usar con este enlace. Se vuelve a preguntar ${en}. Si sigue igual, comprueba que copiaste el enlace entero o avisa a quien te lo envió.`, corto: 'Esperando a quien comparte' };
+    case 'manifiesto-ajeno':
+      return { titulo: 'Ha llegado una respuesta que no es de quien comparte', texto: `Puede que la red por la que navegas esté respondiendo en su lugar (un wifi con página de acceso, un proxy). No se va a usar: se reintenta ${en} y la descarga sigue donde iba.`, corto: 'Reintentando' };
+    case 'disco':
+      return {
+        titulo: e.causa === 'Plazo' ? 'La carpeta ha dejado de responder' : 'No se ha podido escribir en la carpeta',
+        texto: `Puede que otro programa esté usando los archivos (un antivirus, una copia de seguridad o la sincronización con la nube). No hace falta que hagas nada: se reintenta sola ${en}. Lo ya descargado no se pierde.`,
+        corto: 'Reintentando guardar',
+      };
     case 'datos':
       return { titulo: 'Han llegado datos dañados', texto: `Se han descartado y se vuelven a pedir ${en}. Nada dañado se guarda en tu carpeta.`, corto: 'Repitiendo datos dañados' };
     default:
@@ -130,7 +140,9 @@ function textoDisco(err, s, falta) {
     case 'NoModificationAllowedError':
     case 'InvalidStateError':
     case 'InvalidModificationError':
-      return { titulo: 'No se pudo escribir en la carpeta', texto: 'Otro programa puede estar usando los archivos (un antivirus, una copia de seguridad o la sincronización con la nube). Espera un momento y pulsa «Reintentar». Si se repite, elige una carpeta que no se sincronice con la nube.' };
+      return { titulo: 'No se pudo escribir en la carpeta', texto: 'Otro programa puede estar usando los archivos (un antivirus, una copia de seguridad o la sincronización con la nube). Se ha reintentado varias veces sin éxito. Se seguirá probando sola cada pocos minutos; también puedes pulsar «Reintentar». Si se repite, elige una carpeta que no se sincronice con la nube.' };
+    case 'Plazo':
+      return { titulo: 'La carpeta ha dejado de responder', texto: `Una escritura en la carpeta ${carpeta} no termina. Puede que el disco esté ocupado, desconectándose o en reposo. Se seguirá probando sola cada pocos minutos; también puedes pulsar «Reintentar». Lo ya descargado no se pierde.` };
     default:
       return { titulo: 'No se pudo escribir en la carpeta', texto: `Comprueba que hay espacio libre (quedan por guardar ${tam(falta)}) y que la carpeta ${carpeta} sigue disponible, y pulsa «Reintentar». Lo ya descargado no se pierde.` };
   }
@@ -198,7 +210,7 @@ function vista(s) {
     case 'otra-pestana':
       v.sobre = 'Lata';
       v.titulo = 'Ya está abierta';
-      v.mensaje = { tono: 'espera', ico: 'navegador', titulo: 'Esta descarga ya está abierta en otra pestaña', texto: 'Sigue en aquella pestaña. Si la has cerrado, pulsa «Reintentar».' };
+      v.mensaje = { tono: 'espera', ico: 'navegador', titulo: 'Esta descarga ya está abierta en otra pestaña', texto: 'Sigue en aquella pestaña. Si la cierras, esta continuará sola con la descarga; no hace falta que hagas nada.' };
       v.acciones = [{ id: 'recargar', texto: 'Reintentar', tipo: 'lleno', ico: 'cambio' }];
       v.anuncio = v.mensaje.titulo;
       break;
@@ -259,6 +271,11 @@ function vista(s) {
         const te = textoEspera(e);
         v.avance = { cifras, pct, punto: 'espera', detalle: `${te.titulo}. ${te.texto}` };
         v.anuncio = te.titulo;
+        // Esperando para reintentar sola una escritura: se puede adelantar.
+        if (e.motivo === 'disco') {
+          v.acciones = [{ id: 'reintentar', texto: 'Reintentar ahora', tipo: 'lleno', ico: 'cambio' }];
+          v.tituloPagina = `${te.corto} · ${pct} % · ${nombre} — Lata`;
+        }
       }
       break;
     case 'descargando': {
@@ -303,6 +320,8 @@ function vista(s) {
       v.lista = true;
       v.mensaje = { tono: 'peligro', ico: 'alerta', titulo: td.titulo, texto: td.texto };
       v.avance = { cifras, pct, punto: 'error', detalle: 'La descarga está detenida hasta que se pueda escribir en la carpeta.' };
+      // Causa pasajera: la página sigue probando sola de vez en cuando.
+      if (e && e.motivo === 'disco') v.avance.detalle = `La descarga está detenida hasta que se pueda escribir en la carpeta. Se vuelve a intentar sola en ${duracionCorta(cuenta(e))}.`;
       // Si lo que falta es el permiso, al reintentar el navegador vuelve a preguntar: misma indicación.
       const sinPermiso = s.errorDisco && (s.errorDisco.causa === 'NotAllowedError' || s.errorDisco.causa === 'SecurityError');
       if (sinPermiso) v.consejo = consejoPermiso();

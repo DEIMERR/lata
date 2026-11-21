@@ -217,8 +217,14 @@ export async function sellar(clave, nonce, claro, aad) {
 
 /* ------------------------------------------------------------------ manifiesto */
 
+// `autentico`: false si el cuerpo no se pudo autenticar con la clave del enlace (puede no venir del
+// emisor: un wifi con página de acceso, un proxy); true si es del emisor pero no cumple el protocolo.
 export class ErrorManifiesto extends Error {
-  constructor(mensaje) { super(mensaje); this.name = 'ErrorManifiesto'; }
+  constructor(mensaje, autentico = true) {
+    super(mensaje);
+    this.name = 'ErrorManifiesto';
+    this.autentico = autentico;
+  }
 }
 
 // Comprueba la forma del JSON del manifiesto y lo devuelve normalizado.
@@ -257,7 +263,7 @@ export async function abrirManifiesto(clave, cuerpo, shareId) {
   try {
     claro = await abrir(clave, cuerpo, aadManifiesto(shareId));
   } catch {
-    throw new ErrorManifiesto('el manifiesto no se pudo autenticar');
+    throw new ErrorManifiesto('el manifiesto no se pudo autenticar', false);
   }
   let json;
   try {
