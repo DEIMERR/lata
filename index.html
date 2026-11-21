@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es" data-paleta="plata">
+<!--
+  Lata: página receptora. Descarga una carpeta cifrada, la descifra en el navegador y la guarda en la
+  carpeta que elija la persona. Copia exportada como sitio estático (modo fijo): se abre como <pagina>#<secreto> y sus recursos van junto a ella.
+  La política de contenido del motor es estricta: aquí no hay scripts ni estilos en línea.
+  Para alojarla como sitio estático (modo fijo) se exporta con motor/web/exportar-pagina.mjs, que
+  cambia estas rutas por relativas y añade la política de contenido en una etiqueta meta.
+-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: https://lata-encuentro.encuentro.workers.dev; worker-src 'self'; base-uri 'none'; form-action 'none';">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#0C0C0D">
+  <title>Lata</title>
+  <link rel="icon" type="image/svg+xml" href="./icono.svg">
+  <link rel="stylesheet" href="./estilos.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="barra-app">
+      <div class="marca">
+        <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0zM10.4 12a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0zM11.26 6.52a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0-3.8 0zM15.67 11.42a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0-3.8 0zM12.38 17.12a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0-3.8 0zM5.94 15.75a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0-3.8 0zM5.25 9.2a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0-3.8 0z"/></svg></span>
+        Lata
+      </div>
+      <div class="barra-der">
+        <span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8h-1V6A5 5 0 0 0 7 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zM9 6a3 3 0 0 1 6 0v2H9V6zm3 11a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/></svg><span>Cifrado de extremo a extremo</span></span>
+        <div class="tema">
+          <button type="button" class="btn-icono" id="tema-boton" aria-haspopup="true" aria-expanded="false" aria-controls="tema-menu" aria-label="Cambiar los colores" title="Colores">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.42-4.03-8-9-8zm-5.5 9a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3 4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>
+          </button>
+          <div class="tema-menu" id="tema-menu" role="radiogroup" aria-label="Colores" hidden>
+            <button type="button" class="muestra" role="radio" aria-checked="false" data-pal="plata" aria-label="Blanco y negro" title="Blanco y negro"></button>
+            <button type="button" class="muestra" role="radio" aria-checked="false" data-pal="ambar" aria-label="Ámbar proyector" title="Ámbar proyector"></button>
+            <button type="button" class="muestra" role="radio" aria-checked="false" data-pal="telon" aria-label="Rojo telón" title="Rojo telón"></button>
+            <button type="button" class="muestra" role="radio" aria-checked="false" data-pal="teal" aria-label="Verde azulado" title="Verde azulado"></button>
+            <button type="button" class="muestra" role="radio" aria-checked="false" data-pal="sepia" aria-label="Sepia claro" title="Sepia claro"></button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="heroe">
+        <div class="heroe-texto">
+          <p class="sobre" id="sobre">Lata</p>
+          <h1 id="titulo">Abriendo el enlace…</h1>
+          <p class="sub" id="sub"></p>
+        </div>
+        <div class="anillo" id="anillo" aria-hidden="true" hidden><b><span id="anillo-num">0</span><small>%</small></b></div>
+      </section>
+
+      <section class="tarjeta" id="tarjeta" aria-labelledby="titulo">
+        <div class="mensaje" id="mensaje" hidden>
+          <span class="est" id="mensaje-ico"></span>
+          <div>
+            <strong id="mensaje-titulo"></strong>
+            <p id="mensaje-texto"></p>
+          </div>
+        </div>
+        <ul class="colisiones" id="colisiones" aria-label="Archivos que ya están en la carpeta con otro tamaño" hidden></ul>
+        <div id="avance" hidden>
+          <div class="fila"><span id="cifras"></span></div>
+          <div class="pista pelicula" id="pista" role="progressbar" aria-label="Avance de la descarga" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="pista-relleno"></i></div>
+          <p class="detalle" id="detalle"><span class="punto" id="detalle-punto" hidden></span><span id="detalle-texto"></span></p>
+        </div>
+        <div class="consejo" id="consejo" role="note" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+          <p id="consejo-texto"></p>
+        </div>
+        <div class="acciones" id="acciones"></div>
+        <p class="nota-acciones" id="nota-acciones" hidden></p>
+      </section>
+
+      <section id="zona-lista" hidden>
+        <h2 class="tit" id="lista-titulo">Archivos</h2>
+        <div class="herramientas" id="herramientas">
+          <label class="buscar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <input type="search" id="buscar" placeholder="Buscar por nombre" aria-label="Buscar por nombre" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="filtros" role="group" aria-label="Ordenar y filtrar">
+            <button type="button" class="filtro" data-orden="nombre" aria-pressed="true">Por nombre</button>
+            <button type="button" class="filtro" data-orden="mayor" aria-pressed="false">Más grandes primero</button>
+            <button type="button" class="filtro" data-orden="menor" aria-pressed="false">Más pequeños primero</button>
+            <span class="sep" aria-hidden="true"></span>
+            <button type="button" class="filtro" id="ocultar" aria-pressed="false">Ocultar completados</button>
+          </div>
+        </div>
+        <ul class="lista" id="lista" aria-labelledby="lista-titulo"></ul>
+        <div class="mas"><button type="button" class="btn texto" id="mas" hidden></button></div>
+      </section>
+
+      <p class="pie" id="pie"></p>
+    </main>
+  </div>
+
+  <dialog id="dlg-archivos" class="dialogo ancho" aria-labelledby="dlg-archivos-titulo">
+    <h2 id="dlg-archivos-titulo">Elegir archivos</h2>
+    <p class="dlg-nota">Marca lo que quieres descargar. Puedes cambiarlo cuando quieras; lo ya descargado no se pierde.</p>
+    <label class="buscar en-dialogo">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <input type="search" id="sel-buscar" placeholder="Buscar por nombre" aria-label="Buscar por nombre" autocomplete="off" spellcheck="false">
+    </label>
+    <label class="sel-todo"><input type="checkbox" class="casilla" id="sel-todo"><span>Todo</span><span class="sel-meta" id="sel-todo-meta"></span></label>
+    <div class="arbol" id="sel-arbol"></div>
+    <div class="dlg-pie">
+      <span class="sel-resumen" id="sel-resumen" aria-live="polite"></span>
+      <div class="dlg-botones">
+        <button type="button" class="btn texto" id="sel-cancelar">Cancelar</button>
+        <button type="button" class="btn lleno" id="sel-aplicar">Descargar lo elegido</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-aviso" class="dialogo" aria-labelledby="dlg-aviso-titulo">
+    <h2 id="dlg-aviso-titulo"></h2>
+    <p class="dlg-nota" id="dlg-aviso-texto"></p>
+    <div class="dlg-pie"><span></span><div class="dlg-botones"><button type="button" class="btn lleno" id="dlg-aviso-cerrar">Entendido</button></div></div>
+  </dialog>
+
+  <div class="aviso-flotante" id="aviso-flotante" role="status" aria-live="polite" hidden></div>
+  <p class="solo-lector" id="anuncio" aria-live="polite"></p>
+  <noscript><p class="sin-js">Esta página necesita JavaScript para descifrar y guardar los archivos. Actívalo y vuelve a cargar.</p></noscript>
+</body>
+</html>
