@@ -7,7 +7,9 @@
 //   invalido      enlace mal formado, revocado o ilegible          → motivoInvalido
 //   incompatible  el navegador no tiene showDirectoryPicker
 //   otra-pestana  la misma descarga ya está abierta en otra pestaña de este navegador
-//   listo         manifiesto cargado, falta elegir carpeta
+//   listo         manifiesto cargado, falta elegir carpeta (también si, ya terminada la descarga y con la
+//                 página abierta, el emisor añade o cambia archivos → anadidos; entonces la pestaña
+//                 conserva en memoria la carpeta de antes y basta un clic para seguir en ella)
 //   permiso       hay carpeta recordada pero el navegador pide confirmar el permiso (hace falta un clic)
 //   preparando    revisando lo que ya hay en la carpeta (solo lectura hasta saber que no hay choques);
 //                 también, con `espera` de motivo «disco», aguardando para reintentar sola una escritura fallida
@@ -16,6 +18,9 @@
 //   pausado       en pausa por la persona
 //   disco         no se pudo escribir en la carpeta                → errorDisco
 //   completado    todo lo elegido está en la carpeta               → resumen
+//
+// Qué se descarga (la cola): `seleccion`. «Descargar todo» pone todo; el botón de una fila añade ese
+// archivo (o lo quita, si aún no ha empezado). Con «todo», lo que el emisor añada después entra solo.
 //
 // Dos modos (docs/PROTOCOLO.md, sección 10.5):
 //   clásico   la página la sirve el propio motor en /s/<shareId>; la API está en el mismo origen.
@@ -26,6 +31,7 @@
 import * as almacen from './almacen.js';
 import { crearApi, ErrorApi, esperaProgresiva } from './api.js';
 import { Descarga, acotarTrabajadores } from './descarga.js';
+import { plural } from './formato.js';
 import { abrirPuntero, derivarClavePuntero, derivarIdPuntero, ErrorPuntero, leerModo, pedirPuntero } from './puntero.js';
 import {
   abrirManifiesto, bytesAB64u, derivarClaveAcceso, derivarClaveManifiesto, ErrorManifiesto, importarSecreto,
@@ -34,7 +40,9 @@ import {
 
 const INFORME_MIN_MS = 5200;      // como mucho un informe cada 5 s (con margen)
 const INFORME_REPOSO_MS = 60000;  // sin cambios, un latido por minuto
-const SONDEO_ESTADO_MS = 30000;   // cada cuánto se mira si el manifiesto cambió
+export const SONDEO_ESTADO_MS = 8000;    // cada cuánto se mira si el emisor cambió la lista (lo añadido se ve en menos de 15 s)
+export const SONDEO_CALMA_MS = 600000;   // con la descarga terminada y este tiempo sin novedad, se mira más despacio…
+export const SONDEO_LENTO_MS = 60000;    // …una vez por minuto, hasta que algo cambie o la pestaña vuelva a estar a la vista
 const VENTANA_MS = 10000;         // ventana móvil de la velocidad
 const PUNTERO_MIN_MS = 900;       // modo fijo: como mucho una consulta al punto de encuentro por segundo
 
@@ -79,8 +87,16 @@ function nuevoArchivo(f, ruta) {
     verificado: false, yaEstaba: false, cambiado: false,
     adoptado: false,    // se monta con alguna parte que la página no escribió: nunca «Verificado»
     recordado: false,   // este navegador recuerda haberlo completado, pero aún no se ha mirado la carpeta
+    nuevo: false,       // el emisor lo añadió con la página ya abierta
   };
 }
+
+// ¿Hay una descarga en marcha (o en pausa) con su carpeta? Entonces la cola se puede cambiar sin preguntar.
+const enMarcha = (s) => !!s.descarga && !!s.escritor && (s.fase === 'descargando' || s.fase === 'pausado');
+
+// Un archivo en cola del que todavía no se ha pedido ni guardado nada: se puede quitar sin dejar restos.
+const sinEmpezar = (a) => a.estado === 'cola' && a.activas.size === 0 && a.hechas.size === 0
+  && a.guardados === 0 && a.bytesAbiertos === 0 && a.bytesVuelo === 0;
 
 export class Sesion {
   // op: { ubicacion: { pathname, hash }, soportado, elegirCarpeta(), crearEscritor(carpeta, tamTrozo, shareIdTexto),
@@ -130,7 +146,18 @@ export class Sesion {
     this.esperaManifiesto = null;     // el emisor envió un manifiesto más antiguo: se reintenta
     this.colision = null;             // { archivos: [{ id, ruta, aqui, llega }], subcarpeta }
     this.completadaAntes = false;     // este navegador recuerda haber terminado ya esta descarga
-    this.pideCarpeta = false;         // hay que volver a elegir la carpeta para añadir archivos
+    this.finPrevio = false;           // esta página terminó una descarga y sigue abierta (conserva la carpeta solo en memoria)
+    this.abriendo = false;            // se está decidiendo en qué carpeta seguir (la de memoria o la ventana del navegador)
+    this.retiradosEnCarpeta = new Map(); // id → ruta de lo que el emisor retiró cuando ya estaba descargado: sigue en la carpeta
+    this.retiradosDeCola = 0;         // archivos retirados por el emisor mientras estaban en la cola de esta descarga
+    this.colaVacia = '';              // la descarga se quedó sin nada que bajar: 'retirado' (lo retiró el emisor) o 'quitado'
+    this.novedad = Date.now();        // última vez que cambió algo (fase, lista) o que la pestaña volvió a estar a la vista
+    this.anadidos = new Set();        // ids de lo que el emisor ha añadido desde entonces: «Descargar lo nuevo»
+    this.eligiendo = false;           // la ventana de elegir carpeta está abierta
+    this.admision = Promise.resolve(); // revisiones en la carpeta de lo que entra en la cola, de una en una
+    this.sondeando = false;
+    this.fallosSondeo = 0;            // consultas de estado seguidas sin respuesta: se espacian
+    this.enlaceCerrado = false;       // con la descarga terminada el enlace dejó de valer: ya no se pregunta nada
     this.nombreCarpetaFinal = '';
     this.trozosRechazados = 0;
     // Modo fijo (sección 10). `fijo` es null en el modo clásico.
@@ -153,6 +180,7 @@ export class Sesion {
   ponerFase(fase) {
     if (this.fase === fase) return;
     this.fase = fase;
+    this.novedad = Date.now();
     if (fase !== 'descargando') { this.muestras = []; this.velocidad = 0; }
     this.programarInforme();
     this.cambio();
@@ -430,6 +458,13 @@ export class Sesion {
   }
 
   invalidar(motivo) {
+    // Con la descarga terminada y la carpeta suelta, que el enlace deje de valer no cambia nada de lo
+    // descargado: la pantalla final se queda como está y la página deja de preguntar al emisor.
+    if (this.fase === 'completado') {
+      this.enlaceCerrado = true;
+      this.soltarCarpeta();   // tampoco se conserva ya la carpeta en memoria
+      return false;
+    }
     this.motivoInvalido = motivo;
     this.esperaCarga = null;
     this.esperaManifiesto = null;
@@ -445,11 +480,16 @@ export class Sesion {
     return false;
   }
 
-  // Deja de tener acceso a la carpeta: fuera de IndexedDB y de la memoria. Se hace al completar la
-  // descarga y ante un enlace no válido o revocado (401).
-  soltarCarpeta() {
+  // Deja de tener acceso a la carpeta: fuera de IndexedDB y de la memoria. Se hace ante un enlace no
+  // válido o revocado (401).
+  // Al completar la descarga (`enMemoria`) el identificador se borra igualmente de IndexedDB: la página
+  // no GUARDA acceso de escritura más allá de la transferencia (protocolo, sección 8). Lo que sí
+  // conserva, solo en la memoria de esta pestaña y mientras siga abierta, es el identificador que ya
+  // tenía, para que bajar otro archivo después no obligue a elegir la carpeta otra vez. Al cerrar o
+  // recargar la pestaña desaparece, y solo se usa si el navegador mantiene el permiso (queryPermission).
+  soltarCarpeta(enMemoria = false) {
     if (this.carpeta) this.nombreCarpetaFinal = this.carpeta.name || '';
-    this.carpeta = null;
+    if (!enMemoria) this.carpeta = null;
     this.escritor = null;
     this.descarga = null;
     if (this.registro && this.registro.carpeta) {
@@ -535,6 +575,7 @@ export class Sesion {
   // Sustituye el plan por el del manifiesto nuevo, conservando el estado de los archivos que no cambian.
   async aplicarManifiesto(m) {
     const antes = this.porId;
+    const primera = !this.manifiesto;
     const mismo = !!this.manifiesto && this.manifiesto.seq === m.seq;
     const cambioTrozo = !!this.manifiesto && this.manifiesto.tamTrozo !== m.tamTrozo;
     const rutas = sanearRutas(m.archivos);
@@ -559,10 +600,23 @@ export class Sesion {
       }
       lista.push(a);
     }
-    for (const v of antes.values()) if (!conservados.has(v) && !sustituidos.includes(v)) sustituidos.push(v);
+    // Lo que el emisor ha retirado: deja la lista y la cola. Si se estaba bajando, se corta sin más (no
+    // es un fallo) y se quitan sus partes a medias. Lo que ya estaba descargado NO se toca: la página
+    // nunca borra un archivo terminado; solo se apunta que sigue en la carpeta.
+    const ids = new Set(m.archivos.map((f) => f.id));
+    const retirados = [...antes.values()].filter((v) => !ids.has(v.id));
+    sustituidos.push(...retirados);
+    for (const v of sustituidos) if (this.descarga) this.descarga.abortarArchivo(v);
+    if (this.descarga && sustituidos.length) await this.descarga.enCalma();   // lo abierto ya está cerrado y descartado
+    // Se mira cómo ha quedado cada uno DESPUÉS de cortar: un archivo que justo terminaba de cerrarse
+    // entero se ha conservado y cuenta como descargado, igual que los que ya lo estaban.
+    for (const v of retirados) {
+      if (v.estado === 'hecho') this.retiradosEnCarpeta.set(v.id, v.ruta);
+      else if (enMarcha(this) && v.elegido && !v.error) this.retiradosDeCola++;
+    }
     for (const v of sustituidos) {
-      if (this.descarga) this.descarga.abortarArchivo(v);
-      if (this.escritor && v.segmentos && !cambioTrozo) await this.escritor.descartar(v).catch(() => {});
+      // Un archivo que se está uniendo en este instante se deja terminar: él mismo quita sus partes.
+      if (this.escritor && v.segmentos && !cambioTrozo && v.estado !== 'ensamblando') await this.escritor.descartar(v).catch(() => {});
     }
     lista.sort((x, y) => colator.compare(x.ruta, y.ruta));
     for (const a of lista) {
@@ -573,9 +627,22 @@ export class Sesion {
     this.porId = new Map(lista.map((a) => [a.id, a]));
     this.manifiesto = m;
     this.versionPlan++;
+    if (!primera && !mismo) this.novedad = Date.now();
+    // Lo que el emisor ha añadido con la página abierta: se avisa. Si se descarga todo, entra solo en la
+    // cola (ya está elegido); si solo se eligieron algunos, queda en la lista con su botón.
+    const anadidos = primera ? [] : lista.filter((a) => !antes.has(a.id) && a.segmentos);
+    for (const a of anadidos) {
+      a.nuevo = true;
+      this.retiradosEnCarpeta.delete(a.id);   // lo retiró y lo ha vuelto a poner
+      if (this.finPrevio) this.anadidos.add(a.id);
+    }
+    // Un solo aviso para lo añadido y lo retirado en la misma tanda.
+    const partes = [];
+    if (anadidos.length) partes.push(`añadido ${plural(anadidos.length, 'archivo', 'archivos')}`);
+    if (retirados.length) partes.push(`retirado ${plural(retirados.length, 'archivo', 'archivos')}`);
+    if (partes.length) this.aviso('Han ' + partes.join(' y han '));
     const nuevos = lista.filter((a) => !conservados.has(a) && a.segmentos);
-    const enMarcha = !!this.descarga && !!this.escritor && (this.fase === 'descargando' || this.fase === 'pausado');
-    if (enMarcha && !cambioTrozo && nuevos.length) {
+    if (enMarcha(this) && !cambioTrozo && nuevos.length) {
       // Hasta revisarlos en la carpeta no se pueden descargar (podrían chocar con archivos ajenos).
       for (const a of nuevos) a.bloqueado = true;
       this.descarga.establecer(this.archivos);
@@ -590,7 +657,48 @@ export class Sesion {
     } else if (this.descarga) {
       this.descarga.establecer(this.archivos);
     }
+    // Con la descarga terminada, lo añadido puede estar ya en la carpeta (el emisor lo retiró y lo ha
+    // vuelto a poner): se mira antes de ofrecer bajarlo.
+    if (this.finPrevio && anadidos.length) await this.reconocerEnCarpeta(anadidos);
+    // Ya había terminado y ahora hay algo más que bajar (añadido o cambiado): deja de estar completa.
+    // No hay descarga en marcha: hace falta un clic para seguir (en la carpeta que la pestaña conserva).
+    const falta = this.nuevosPendientes().length > 0 || this.pendientes().length > 0;
+    if (this.fase === 'completado' && falta) {
+      this.resumen = null;
+      this.ponerFase('listo');
+    } else if (this.fase === 'listo' && this.finPrevio && !falta) {
+      // El emisor ha retirado lo que añadió: vuelve a estar todo.
+      this.hacerResumen();
+      this.ponerFase('completado');
+    } else if (this.fase === 'completado' && !primera && !mismo) {
+      // Sigue completa (retiraron algo, o lo añadido ya estaba): el resumen cuenta lo que hay ahora en la lista.
+      this.hacerResumen();
+    }
     this.cambio();
+  }
+
+  // Solo lectura. Con la descarga terminada y la carpeta todavía en la memoria de la pestaña (y con el
+  // permiso concedido), mira si esos archivos ya están en ella con el tamaño exacto: entonces son
+  // «Ya estaba» y no hay nada que ofrecer. Si no se puede mirar, no pasa nada: se verá al descargarlos.
+  async reconocerEnCarpeta(archivos) {
+    if (!this.carpeta || this.escritor || this.descarga) return;
+    try {
+      if ((await this.consultarPermiso()) !== 'granted') return;
+      const e = this.op.crearEscritor(this.carpeta, this.manifiesto.tamTrozo, this.enlace.shareIdTexto);
+      await e.cargarRegistro();
+      const d = this.destinoFinal;
+      if (!e.registroEnDisco && typeof d === 'string' && d !== '' && (await e.existeCarpeta(d))) e.fijarDestino(d);
+      const estados = await e.revisar(archivos);
+      for (const a of archivos) {
+        const r = estados.get(a.id);
+        if (!r || !r.completo || this.porId.get(a.id) !== a) continue;
+        a.estado = 'hecho';
+        a.guardados = a.tam;
+        a.verificado = false;
+        a.yaEstaba = true;
+        a.nuevo = false;
+      }
+    } catch { /* la carpeta no se deja leer ahora: se ofrecerá descargarlos y se verá entonces */ }
   }
 
   // Vuelve a pedir el manifiesto tras un 404, un 409 o un cambio de secuencia. Una sola vez a la vez.
@@ -634,21 +742,34 @@ export class Sesion {
   }
 
   // Tiene que llamarse desde un clic: el navegador solo enseña su ventana tras un gesto.
-  async elegirCarpeta() {
+  // `seleccion`: qué se va a descargar en esa carpeta (null = todo, o un Set de ids); sin él, lo que
+  // ya estaba elegido. Solo se aplica si se llega a elegir carpeta: cancelar la ventana no cambia nada.
+  async elegirCarpeta(seleccion) {
+    if (this.eligiendo) return false;
     let carpeta;
+    this.eligiendo = true;
     try {
       carpeta = await this.op.elegirCarpeta();
     } catch (e) {
       if (e && e.name === 'AbortError') return false; // cerró la ventana sin elegir
       this.aviso('No se pudo usar esa carpeta. El navegador no deja usar carpetas del sistema: crea una carpeta nueva y elígela.');
       return false;
+    } finally {
+      this.eligiendo = false;
     }
     if (!carpeta) return false;
     // Si es otra carpeta, lo que se sabía de la anterior ya no vale.
     let misma = false;
     try { misma = !!this.carpeta && (await this.carpeta.isSameEntry(carpeta)); } catch { /* se trata como distinta */ }
+    await this.usarCarpeta(carpeta, misma, seleccion);
+    return true;
+  }
+
+  // Empieza (o sigue) en esa carpeta. `misma`: es la que ya se estaba usando.
+  async usarCarpeta(carpeta, misma, seleccion) {
     if (this.descarga) { this.descarga.detener(); this.descarga = null; }
     this.escritor = null;
+    if (seleccion !== undefined) this.fijarSeleccion(seleccion);
     for (const a of this.archivos) {
       a.geo = null;
       if (!misma) { a.verificado = false; a.yaEstaba = false; }
@@ -656,6 +777,7 @@ export class Sesion {
     if (!misma) {
       this.hechos = new Map();
       almacen.olvidarHechos(this.enlace.shareIdTexto);
+      this.retiradosEnCarpeta.clear();
     }
     this.carpeta = carpeta;
     this.reintentosDisco = 0;
@@ -666,7 +788,23 @@ export class Sesion {
     this.guardarRegistro();
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch { /* opcional */ }
     await this.comenzar();
-    return true;
+  }
+
+  // Descarga `seleccion` (null = todo, o un Set de ids) cuando no hay ninguna descarga en marcha. Desde
+  // un clic. Si esta pestaña ya terminó una descarga y conserva su carpeta en memoria, y el navegador
+  // mantiene el permiso, sigue en ella sin preguntar nada; si no, el navegador enseña su ventana.
+  async descargarEn(seleccion) {
+    if (this.abriendo || (this.fase !== 'listo' && this.fase !== 'completado')) return false;
+    this.abriendo = true;
+    try {
+      if (this.carpeta && (await this.consultarPermiso()) === 'granted') {
+        await this.usarCarpeta(this.carpeta, true, seleccion);
+        return true;
+      }
+      return await this.elegirCarpeta(seleccion);
+    } finally {
+      this.abriendo = false;
+    }
   }
 
   // También desde un clic.
@@ -697,7 +835,10 @@ export class Sesion {
     this.turnoDisco++;
     this.resumen = null;
     this.colision = null;
-    this.pideCarpeta = false;
+    this.finPrevio = false;
+    this.anadidos.clear();
+    this.retiradosDeCola = 0;
+    this.colaVacia = '';
     if (this.descarga) { this.descarga.detener(); this.descarga = null; }
     this.ponerFase('preparando');
     let estados;
@@ -747,6 +888,7 @@ export class Sesion {
       return;
     }
     this.aplicarEstados(validos(), estados);
+    this.recordarTodoSiNoFaltaNada();
     this.descarga = new Descarga({
       claveBase: this.claveBase, credencial: this.credencial, shareIdTexto: this.enlace.shareIdTexto, shareId: this.enlace.shareId,
       tamTrozo: this.manifiesto.tamTrozo, escritor: this.escritor, trabajadores: acotarTrabajadores(this.op.trabajadores),
@@ -761,6 +903,16 @@ export class Sesion {
     this.programarInforme();
     this.descarga.iniciar(); // si no queda nada, avisa «fin» enseguida
     this.cambio();
+  }
+
+  // Vista la carpeta: si entre lo que está en la cola y lo que ya está en ella no queda fuera ningún
+  // archivo, es lo mismo que haberlo elegido todo, y lo que el emisor añada después entrará solo.
+  recordarTodoSiNoFaltaNada() {
+    if (this.seleccion.todo || !this.archivos.every((a) => a.error || a.elegido || a.estado === 'hecho')) return;
+    this.seleccion = { todo: true, ids: new Set() };
+    for (const a of this.archivos) a.elegido = true;
+    this.registro.seleccion = { todo: true, ids: [] };
+    this.guardarRegistro();
   }
 
   // Respuesta a la pregunta de los archivos que chocan. Hasta aquí no se ha tocado nada de la carpeta.
@@ -817,7 +969,7 @@ export class Sesion {
     }
   }
 
-  // Archivos que entran con la descarga ya en marcha (manifiesto nuevo o selección ampliada): se revisan
+  // Archivos que entran con la descarga ya en marcha (manifiesto nuevo o cola ampliada): se revisan
   // en la carpeta y se apuntan antes de poder descargarse. Si alguno choca con un archivo ajeno, se para
   // todo y se pregunta. Devuelve false si la descarga se ha detenido.
   async admitir(nuevos) {
@@ -1014,16 +1166,30 @@ export class Sesion {
       if (this.fase !== 'descargando' && this.fase !== 'pausado') return;
       if (this.pendientes().length) { this.descarga.replanificar(); return; }
       this.descarga.detener();
+      if (!this.archivos.some((a) => a.elegido)) {
+        // La cola se ha quedado sin nada: el emisor retiró lo que se había elegido (o la persona lo quitó
+        // todo). No hay nada que dar por terminado: se vuelve a la pantalla inicial, que lo explica. La
+        // carpeta se trata como al terminar: fuera de IndexedDB, y en la memoria de la pestaña.
+        await this.escritor.restos();
+        this.colaVacia = this.retiradosDeCola > 0 || this.retiradosEnCarpeta.size > 0 ? 'retirado' : 'quitado';
+        this.registro.msActivo = this.msActivo;
+        this.soltarCarpeta(true);
+        this.guardarRegistro();
+        this.ponerFase('listo');
+        return;
+      }
       this.restos = await this.escritor.restos();
       this.hacerResumen();
       this.destinoFinal = this.escritor.registro.destino;
       this.registro.msActivo = this.msActivo;
       this.registro.completada = Date.now();
-      // Terminada la transferencia, la página no conserva acceso de escritura a la carpeta.
-      this.soltarCarpeta();
+      // Terminada la transferencia, la página no guarda acceso de escritura a la carpeta (IndexedDB).
+      // El identificador se queda solo en la memoria de esta pestaña, por si se baja algo más.
+      this.soltarCarpeta(true);
       this.guardarRegistro();
       this.hechos = new Map();
       almacen.olvidarHechos(this.enlace.shareIdTexto);
+      this.finPrevio = true;
       this.ponerFase('completado');
     } finally {
       this.terminando = false;
@@ -1034,48 +1200,113 @@ export class Sesion {
     const t = this.totales();
     this.resumen = {
       archivos: t.hechos, bytes: t.bytesGuardados, ms: this.msActivo,
-      verificados: t.verificados, yaEstaban: t.yaEstaban, errores: t.errores, parcial: t.elegidos < t.validos,
+      verificados: t.verificados, yaEstaban: t.yaEstaban, errores: t.errores,
     };
   }
 
-  /* ---------------------------------------------------------------- selección */
+  /* ---------------------------------------------------------------- qué se descarga (la cola) */
 
   pendientes() {
     return this.archivos.filter((a) => a.elegido && !a.error && a.estado !== 'hecho');
   }
 
-  // ids: Set con los archivos elegidos. Si están todos, se recuerda «todo» (incluye los que lleguen después).
-  async cambiarSeleccion(ids) {
-    const validos = this.archivos.filter((a) => !a.error);
-    const todo = validos.every((a) => ids.has(a.id));
-    this.seleccion = { todo, ids: new Set(ids) };
-    const nuevos = [];
-    for (const a of this.archivos) {
-      const nuevo = todo || ids.has(a.id);
-      if (a.elegido && !nuevo && this.descarga) this.descarga.abortarArchivo(a);
-      if (!a.elegido && nuevo && a.segmentos && a.estado !== 'hecho') nuevos.push(a);
-      a.elegido = nuevo;
+  // Lo que el emisor añadió después de terminar y aún no está descargado.
+  nuevosPendientes() {
+    const lista = [];
+    for (const id of this.anadidos) {
+      const a = this.porId.get(id);
+      if (a && !a.error && a.estado !== 'hecho') lista.push(a);
     }
-    this.registro.seleccion = { todo, ids: todo ? [] : [...ids] };
+    return lista;
+  }
+
+  // Qué ofrece el botón de la fila de un archivo: 'descargar', 'quitar' (sacarlo de la cola) o '' (nada).
+  //   - sin carpeta todavía (o ya terminada la descarga): descargar; pedirá la carpeta;
+  //   - con la descarga en marcha: descargar lo que no está en la cola, y quitar lo que está en cola y
+  //     aún no ha empezado. Lo que ya está bajando o bajado no ofrece nada.
+  // En las demás fases la página necesita antes otra cosa (un permiso, una decisión, reintentar).
+  accionFila(a) {
+    if (a.error || a.estado === 'hecho') return '';
+    if (enMarcha(this)) {
+      if (!a.elegido) return 'descargar';
+      return sinEmpezar(a) ? 'quitar' : '';
+    }
+    return this.fase === 'listo' || this.fase === 'completado' ? 'descargar' : '';
+  }
+
+  // Botón de una fila. Desde un clic: sin carpeta, el navegador enseña su ventana y después se descarga
+  // solo ese archivo; con carpeta (en marcha, o la que esta pestaña conserva de la descarga anterior),
+  // entra en la cola (o sale de ella) sin preguntar nada.
+  async alternarArchivo(id) {
+    const a = this.porId.get(id);
+    const que = a ? this.accionFila(a) : '';
+    if (!que) return false;
+    if (!enMarcha(this)) return this.descargarEn(new Set([id]));
+    const ids = new Set(this.archivos.filter((x) => x.elegido && !x.error).map((x) => x.id));
+    if (que === 'quitar') ids.delete(id); else ids.add(id);
+    await this.cambiarSeleccion(ids);
+    return true;
+  }
+
+  // Botón principal: todo lo que falte. Lo que ya está en la carpeta no se vuelve a bajar.
+  async descargarTodo() {
+    if (enMarcha(this)) {
+      await this.cambiarSeleccion(null);
+      return true;
+    }
+    return this.descargarEn(null);
+  }
+
+  // «Descargar lo nuevo»: SOLO lo que el emisor añadió después de terminar, sea cual sea la carpeta.
+  // Lo que ya se descargó no entra en la cola: en la misma carpeta saldrá como «Ya estaba», y en otra
+  // sencillamente no está (queda disponible con su botón y con «Descargar lo que falta»).
+  async descargarNuevo() {
+    const nuevos = this.nuevosPendientes();
+    if (this.fase !== 'listo' || !nuevos.length) return false;
+    return this.descargarEn(new Set(nuevos.map((a) => a.id)));
+  }
+
+  // Fija qué archivos están en la cola. ids: Set, o null para «todo» (incluye lo que llegue después).
+  // Si con esos ids no queda fuera nada de lo que falta por bajar, también se recuerda «todo». Lo que
+  // «ya está» solo se da por sabido con la carpeta delante: sin ella puede que se elija otra distinta,
+  // y entonces pulsar una fila no debe traer consigo nada más que ese archivo.
+  // Devuelve los archivos que entran en la cola con el cambio.
+  fijarSeleccion(ids) {
+    const conCarpeta = enMarcha(this);
+    const todo = ids === null || this.archivos.every((a) => a.error || ids.has(a.id) || (conCarpeta && a.estado === 'hecho'));
+    this.seleccion = { todo, ids: todo ? new Set() : new Set(ids) };
+    const entran = [];
+    for (const a of this.archivos) {
+      const elegido = todo || ids.has(a.id);
+      if (a.elegido && !elegido) {
+        if (this.descarga) this.descarga.abortarArchivo(a);
+        a.bloqueado = false;
+      }
+      if (!a.elegido && elegido && a.segmentos && a.estado !== 'hecho') entran.push(a);
+      a.elegido = elegido;
+    }
+    this.registro.seleccion = { todo, ids: [...this.seleccion.ids] };
     this.guardarRegistro();
     this.versionPlan++;
-    if (this.fase === 'completado') {
-      if (this.pendientes().length) {
-        // La carpeta ya se soltó al terminar: para bajar lo añadido hay que elegirla otra vez.
-        this.resumen = null;
-        this.pideCarpeta = true;
-        this.fase = 'listo';
-      } else {
-        this.hacerResumen();
-      }
-    } else if (this.descarga && this.escritor && (this.fase === 'descargando' || this.fase === 'pausado')) {
-      if (nuevos.length) {
-        // Lo recién elegido se revisa en la carpeta antes de poder descargarse.
-        for (const a of nuevos) a.bloqueado = true;
-        this.cambio();
-        if (!(await this.admitir(nuevos))) return;
-      }
-      this.descarga.replanificar();
+    return entran;
+  }
+
+  // Cambia la cola con la descarga en marcha. Lo que entra se revisa en la carpeta antes de poder
+  // descargarse (podría chocar con un archivo ajeno); las revisiones van de una en una.
+  async cambiarSeleccion(ids) {
+    const entran = this.fijarSeleccion(ids);
+    if (enMarcha(this)) {
+      const descarga = this.descarga;
+      for (const a of entran) a.bloqueado = true;
+      this.programarInforme();
+      this.cambio();   // la fila cambia ya, sin esperar a la carpeta
+      this.admision = this.admision.catch(() => {}).then(async () => {
+        if (this.descarga !== descarga || !enMarcha(this)) return;
+        const lista = entran.filter((a) => a.elegido && a.bloqueado && this.porId.get(a.id) === a);
+        if (lista.length && !(await this.admitir(lista))) return;
+        if (this.descarga === descarga) descarga.replanificar();
+      });
+      await this.admision;
     }
     this.programarInforme();
     this.cambio();
@@ -1083,16 +1314,18 @@ export class Sesion {
 
   /* ---------------------------------------------------------------- cifras */
 
-  totales() {
+  // Cuenta lo que está en la cola y lo que ya está en la carpeta aunque no se eligiera (se encontró
+  // al revisarla). Con `todo`, cuenta todos los archivos: es lo que ofrece el botón principal.
+  totales(todo = false) {
     const t = {
       total: this.archivos.length, bytesTodo: 0, validos: 0, elegidos: 0, bytesTotal: 0, hechos: 0, bytesGuardados: 0,
       bytesVisual: 0, verificados: 0, yaEstaban: 0, errores: 0, recordados: 0,
     };
     for (const a of this.archivos) {
       t.bytesTodo += a.tam;
-      if (a.error) { if (a.elegido) t.errores++; continue; }
+      if (a.error) { if (a.elegido || todo) t.errores++; continue; }
       t.validos++;
-      if (!a.elegido) continue;
+      if (!todo && !a.elegido && a.estado !== 'hecho') continue;
       t.elegidos++;
       t.bytesTotal += a.tam;
       t.bytesGuardados += a.guardados;
@@ -1110,6 +1343,7 @@ export class Sesion {
   iniciarReloj() {
     clearInterval(this.reloj);
     this.ultimoTic = Date.now();
+    this.ultimoSondeo = this.ultimoTic;
     this.reloj = setInterval(() => this.tic(), 1000);
   }
 
@@ -1117,6 +1351,7 @@ export class Sesion {
     const ahora = Date.now();
     const dt = Math.min(5000, ahora - this.ultimoTic);
     this.ultimoTic = ahora;
+    if (this.enlaceCerrado) return;
     if (this.fase === 'descargando' && this.descarga) {
       if (!this.descarga.puerta) this.msActivo += dt;
       // Velocidad: bytes recibidos por la red en una ventana móvil de 10 s.
@@ -1128,10 +1363,10 @@ export class Sesion {
         this.registro.msActivo = this.msActivo;
         this.guardarRegistro();
       }
-      if (ahora - this.ultimoSondeo > SONDEO_ESTADO_MS && !this.descarga.puerta && !this.refresco) {
-        this.ultimoSondeo = ahora;
-        this.sondear();
-      }
+    }
+    if (this.tocaSondear(ahora)) {
+      this.ultimoSondeo = ahora;
+      this.sondear();
     }
     const desde = ahora - this.ultimoInforme;
     const finalEntregado = this.fase === 'completado' && this.informeEntregado === 'done';
@@ -1139,13 +1374,37 @@ export class Sesion {
     this.cambio();
   }
 
-  // Mira de vez en cuando si el manifiesto cambió, para rebajar cuanto antes lo que haga falta.
+  // ¿Toca mirar si el emisor cambió la lista? Mientras la página enseña la lista y puede hacer algo con
+  // ella: antes de empezar, descargando, en pausa y ya terminada (el emisor puede añadir archivos
+  // después). No mientras la descarga espera al emisor: entonces ya se le pregunta por otro lado.
+  // Si el emisor no responde, las consultas se espacian (hasta una cada 48 s). Y con la descarga
+  // terminada, tras SONDEO_CALMA_MS sin ninguna novedad, se pasa a una por minuto: una pestaña olvidada
+  // no tiene por qué preguntar cada pocos segundos. Vuelve al ritmo normal en cuanto algo cambia o la
+  // pestaña vuelve a estar a la vista (alVolver).
+  tocaSondear(ahora) {
+    if (!this.manifiesto || this.refresco || this.sondeando || this.enlaceCerrado) return false;
+    if (!['listo', 'descargando', 'pausado', 'completado'].includes(this.fase)) return false;
+    if (this.fase === 'descargando' && this.descarga && this.descarga.puerta) return false;
+    const calma = this.fase === 'completado' && ahora - this.novedad > SONDEO_CALMA_MS;
+    const cada = Math.max(calma ? SONDEO_LENTO_MS : 0, SONDEO_ESTADO_MS * (1 + Math.min(5, this.fallosSondeo)));
+    return ahora - this.ultimoSondeo > cada;
+  }
+
+  // La pestaña vuelve a estar a la vista: se mira la lista al ritmo normal otra vez.
+  alVolver() { this.novedad = Date.now(); }
+
+  // Mira si el manifiesto cambió, para enseñar lo añadido y rebajar cuanto antes lo que haga falta.
   async sondear() {
+    this.sondeando = true;
     try {
-      const st = await this.api.estado();
+      const st = await this.api.estado(AbortSignal.timeout(8000));
+      this.fallosSondeo = 0;
       if (st.manifestSeq !== null && this.manifiesto && st.manifestSeq !== this.manifiesto.seq) this.refrescarManifiesto();
     } catch (e) {
+      this.fallosSondeo++;
       if (e instanceof ErrorApi && e.clase === 'fatal') this.alFatal(e);
+    } finally {
+      this.sondeando = false;
     }
   }
 
@@ -1230,8 +1489,13 @@ export class Sesion {
       trozosRechazados: this.trozosRechazados,
       seqMax: this.seqMax,
       destino: this.destino,
+      carpetaEnMemoria: !!this.carpeta,
       colision: this.colision,
       completadaAntes: this.completadaAntes,
+      seleccionTodo: this.seleccion.todo,
+      retiradosEnCarpeta: [...this.retiradosEnCarpeta.values()],
+      colaVacia: this.colaVacia,
+      anadidos: this.nuevosPendientes().map((a) => a.id),
       esperasVistas: [...this.esperasVistas],
       reintentosDisco: this.reintentosDisco,
       reintentosAuto: this.reintentosAuto,
@@ -1248,6 +1512,7 @@ export class Sesion {
         id: a.id, ruta: a.ruta, tam: a.tam, version: a.version, estado: a.estado, elegido: a.elegido, error: a.error,
         hechas: [...a.hechas].sort((x, y) => x - y), unidades: a.geo ? a.geo.nUnidades : null,
         guardados: a.guardados, verificado: a.verificado, yaEstaba: a.yaEstaba, cambiado: a.cambiado, recordado: a.recordado, adoptado: a.adoptado,
+        nuevo: a.nuevo, accion: this.accionFila(a),
       })),
     };
   }

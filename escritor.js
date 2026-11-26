@@ -104,10 +104,12 @@ async function borrar(dir, nombre, recursivo = false) {
 }
 
 class Unidad {
-  constructor(dir, nombre, fh, flujo, bytes) {
-    this.dir = dir; this.nombre = nombre; this.fh = fh; this.flujo = flujo; this.bytes = bytes;
+  // `final`: lo que se escribe es el archivo final en su sitio (un archivo de pocos trozos), no una parte.
+  constructor(dir, nombre, fh, flujo, bytes, final = false) {
+    this.dir = dir; this.nombre = nombre; this.fh = fh; this.flujo = flujo; this.bytes = bytes; this.final = final;
     this.cierre = null;
     this.abortada = false;
+    this.conservada = false;
   }
 
   // Escribe un trozo en su posición. Los trozos pueden llegar en cualquier orden.
@@ -131,13 +133,25 @@ class Unidad {
   }
 
   // Descarta lo escrito y quita el archivo de 0 bytes que dejó getFileHandle (lo creó la página).
-  // Si había un cierre en marcha, espera a que termine para no cruzarse con él.
+  // Si había un cierre en marcha, espera a que termine para no cruzarse con él, y decide según cómo
+  // haya quedado: un archivo FINAL cuyo cierre terminó bien (tamaño exacto comprobado) es una copia
+  // entera y se conserva: lo que la persona ya ha descargado se queda en su carpeta. Todo lo demás
+  // (una parte, un cierre que falló, un tamaño que no cuadra, un flujo aún abierto) se quita, para no
+  // dejar nunca un archivo a medias ni de 0 bytes.
+  // Devuelve true si el archivo se conserva entero.
   async abortar() {
-    if (this.abortada) return;
+    if (this.abortada) return this.conservada;
     this.abortada = true;
-    if (this.cierre) await this.cierre.catch(() => {});
-    else try { await this.flujo.abort(); } catch { /* ya estaba cerrado o roto */ }
+    if (this.cierre) {
+      const entero = await this.cierre.then(() => true, () => false);
+      if (entero && this.final) {
+        this.conservada = true;
+        return true;
+      }
+    }
+    try { await this.flujo.abort(); } catch { /* ya estaba cerrado o roto */ }
     await borrar(this.dir, this.nombre);
+    return false;
   }
 }
 
@@ -516,7 +530,7 @@ export class EscritorPartes {
     }
     let flujo;
     try { flujo = await fh.createWritable(); } catch (e) { throw deDisco(e, 'abrir para escribir'); }
-    return new Unidad(dir, nombre, fh, flujo, g.unidad(k).bytes);
+    return new Unidad(dir, nombre, fh, flujo, g.unidad(k).bytes, !g.ensambla);
   }
 
   // Une las partes en el archivo final con un solo flujo, comprueba el tamaño y borra las partes.

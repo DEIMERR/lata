@@ -13,8 +13,14 @@ const params = new URLSearchParams(location.search);
 const esLocal = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
 const prueba = esLocal && params.get('prueba') === '1';
 // falloDisco: nombre del error que dará la siguiente escritura (y las falloDiscoVeces - 1 siguientes);
-// cuelgueDisco: número de escrituras que se quedarán colgadas sin terminar nunca.
-const ajustes = { falloDisco: '', falloDiscoVeces: 1, cuelgueDisco: 0 };
+// cuelgueDisco: número de escrituras que se quedarán colgadas sin terminar nunca;
+// cancelarCarpeta: número de veces que la ventana de elegir carpeta se cerrará sin elegir nada;
+// carpeta: nombre de la carpeta de pruebas que «elegirá» la ventana a partir de ahora (en vez de la del enlace);
+// cierreLento: { id, ms, fallo } → al cerrar el archivo o la parte de ese fileId, el cierre tarda `ms` y, si
+// se da `fallo` (nombre de error), en vez de cerrarse se interrumpe con ese error.
+const ajustes = { falloDisco: '', falloDiscoVeces: 1, cuelgueDisco: 0, cancelarCarpeta: 0, carpeta: '', cierreLento: null };
+const cierres = [];   // cierres retrasados por `cierreLento`: { id, inicio, fin, resultado, abortado } (para las pruebas)
+let carpetasPedidas = 0;   // veces que se ha abierto la ventana de elegir carpeta (para las pruebas)
 const milis = (nombre, minimo) => (prueba && Number(params.get(nombre)) >= minimo ? Number(params.get(nombre)) : undefined);
 
 // La página fija no puede enviar cabeceras propias, y `frame-ancestors` no vale en una etiqueta <meta>:
@@ -24,8 +30,14 @@ const enMarco = (() => { try { return window.top !== window.self; } catch { retu
 
 function elegirCarpeta() {
   if (prueba) {
+    carpetasPedidas++;
+    if (ajustes.cancelarCarpeta > 0) {
+      ajustes.cancelarCarpeta--;
+      return Promise.reject(new DOMException('ventana cerrada sin elegir', 'AbortError'));
+    }
     // En pruebas la carpeta sale del almacenamiento privado del navegador (OPFS), sin ventana de selección.
-    const nombre = /^[a-z0-9-]{1,40}$/.test(params.get('carpeta') || '') ? params.get('carpeta') : 'prueba';
+    const pedido = ajustes.carpeta || params.get('carpeta') || '';
+    const nombre = /^[a-z0-9-]{1,40}$/.test(pedido) ? pedido : 'prueba';
     return navigator.storage.getDirectory().then((raiz) => raiz.getDirectoryHandle('lata-' + nombre, { create: true }));
   }
   return window.showDirectoryPicker({ id: 'lata', mode: 'readwrite', startIn: 'downloads' });
@@ -52,6 +64,35 @@ function crearEscritor(carpeta, tamTrozo, shareIdTexto) {
           throw new ErrorDisco({ name: nombre, message: 'fallo simulado' }, 'escribir');
         }
         return escribir(pos, datos);
+      };
+      // Cierre retrasado (y, si se pide, interrumpido): la ventana en la que un archivo ya escrito
+      // todavía se está cerrando.
+      const cerrarFlujo = u.flujo.close.bind(u.flujo);
+      u.flujo.close = async () => {
+        const lento = ajustes.cierreLento;
+        if (!lento || lento.id !== a.id) return cerrarFlujo();
+        const apunte = { id: a.id, inicio: Date.now(), fin: 0, resultado: '', abortado: 0 };
+        cierres.push(apunte);
+        u.apunteCierre = apunte;
+        await new Promise((ok) => setTimeout(ok, lento.ms));
+        try {
+          if (lento.fallo) {
+            await u.flujo.abort().catch(() => {});
+            throw new DOMException('cierre interrumpido (simulado)', lento.fallo);
+          }
+          await cerrarFlujo();
+          apunte.resultado = 'cerrado';
+        } catch (e) {
+          apunte.resultado = 'fallo';
+          throw e;
+        } finally {
+          apunte.fin = Date.now();
+        }
+      };
+      const abortar = u.abortar.bind(u);
+      u.abortar = () => {
+        if (u.apunteCierre && !u.apunteCierre.abortado) u.apunteCierre.abortado = Date.now();
+        return abortar();
       };
       return u;
     };
@@ -118,7 +159,9 @@ async function cuidarPantalla() {
 }
 document.addEventListener('visibilitychange', () => {
   cuidarPantalla();
-  if (document.visibilityState === 'visible' && interfaz) interfaz.pintar();
+  if (document.visibilityState !== 'visible') return;
+  sesion.alVolver();
+  if (interfaz) interfaz.pintar();
 });
 
 /* ---------- aviso antes de cerrar con la descarga en marcha ---------- */
@@ -159,6 +202,10 @@ if (prueba) {
       return !!t;
     },
     pantalla: () => ({ ...pantalla, candado: !!candado }),
+    carpetasPedidas: () => carpetasPedidas,
+    cierres: () => cierres.map((c) => ({ ...c })),
+    // Como si el navegador hubiera dejado de dar por concedido el permiso de la carpeta que la pestaña conserva.
+    perderPermiso: () => { sesion.simularPermiso = true; },
   };
 }
 

@@ -14,15 +14,14 @@ const ICO = {
   seguir: 'M8 5v14l11-7z',
   carpeta: 'M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z',
   alerta: 'M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z',
-  menos: 'M19 13H5v-2h14v2z',
+  archivo: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM6 20V4h7v5h5v11H6z',
+  quitar: 'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
   guardar: 'M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z',
   cambio: 'M12 4V1L8 5l4 4V6a6 6 0 0 1 6 6c0 1-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12a8 8 0 0 0-8-8zm0 14a6 6 0 0 1-6-6c0-1 .25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12a8 8 0 0 0 8 8v3l4-4-4-4v3z',
   copiar: 'M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z',
   red: 'M19.35 10.04A7.49 7.49 0 0 0 12 4a7.48 7.48 0 0 0-6.65 4.04A6 6 0 0 0 6 20h13a5 5 0 0 0 .35-9.96zM13 17h-2v-2h2v2zm0-4h-2V8h2v5z',
   cargando: 'M12 4V2a10 10 0 1 0 10 10h-2a8 8 0 1 1-8-8z',
   navegador: 'M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 14H4V8h16v10z',
-  flecha: 'M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z',
-  archivos: 'M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z',
 };
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -148,19 +147,26 @@ function textoDisco(err, s, falta) {
   }
 }
 
-function vista(s) {
+// Texto de la pantalla del navegador que no sirve. Solo nombra lo que de verdad no funciona: en Chrome
+// para Android la descarga a carpeta sí funciona.
+export const TEXTO_INCOMPATIBLE = 'Para descargar a una carpeta y que la descarga continúe sola si se corta, abre este mismo enlace en Chrome o Edge en un ordenador (Windows, Mac o Linux) o en Chrome en un móvil Android. En iPhone y iPad, en Firefox y en Safari todavía no funciona.';
+
+export function vista(s) {
   const m = s.manifiesto;
-  const t = s.totales();
+  // Sin carpeta todavía no hay cola: las cifras son las de todo, que es lo que ofrece el botón principal.
+  const t = s.totales(s.fase === 'listo');
   const nombre = m ? (m.nombre || 'Archivos compartidos') : '';
   const pct = porcentaje(t.bytesVisual, t.bytesTotal);
   const parcial = m && t.elegidos < t.validos;
+  // Botón principal: todo lo que falte. Cambia de nombre cuando ya hay algo bajado.
+  const algoBajado = s.completadaAntes || s.archivos.some((a) => a.estado === 'hecho');
+  const todo = (tipo) => ({ id: 'descargar-todo', texto: algoBajado ? 'Descargar lo que falta' : 'Descargar todo', tipo, ico: 'baja' });
   const v = {
     sobre: 'Te han compartido', titulo: nombre, anillo: null, mensaje: null, avance: null, acciones: [], lista: false, consejo: null, nota: '', colisiones: null,
     sub: m ? `${plural(t.total, 'archivo', 'archivos')} · ${tam(t.bytesTodo)}` + (parcial ? ` · elegidos ${num(t.elegidos)} (${tam(t.bytesTotal)})` : '') : '',
     pie: '', anuncio: '', tituloPagina: nombre ? `${nombre} — Lata` : 'Lata',
   };
   const cifras = `${tam(t.bytesVisual)} de ${tam(t.bytesTotal)}`;
-  const elegir = { id: 'elegir-archivos', texto: 'Elegir archivos', tipo: 'tonal' };
   const e = s.espera;
 
   switch (s.fase) {
@@ -202,7 +208,7 @@ function vista(s) {
       v.titulo = 'Hace falta Chrome o Edge';
       v.mensaje = {
         tono: 'espera', ico: 'navegador', titulo: 'Este navegador no puede guardar carpetas enteras',
-        texto: 'Para descargar todo de una vez y que la descarga continúe sola si se corta, abre este mismo enlace en Chrome o Edge en un ordenador (Windows, Mac o Linux). En Firefox, en Safari y en móviles todavía no funciona.',
+        texto: TEXTO_INCOMPATIBLE,
       };
       v.acciones = [{ id: 'copiar-enlace', texto: 'Copiar el enlace', tipo: 'lleno', ico: 'copiar' }];
       v.anuncio = v.mensaje.titulo;
@@ -214,19 +220,46 @@ function vista(s) {
       v.acciones = [{ id: 'recargar', texto: 'Reintentar', tipo: 'lleno', ico: 'cambio' }];
       v.anuncio = v.mensaje.titulo;
       break;
-    case 'listo':
-      v.anillo = 0;
+    case 'listo': {
+      v.anillo = pct;
       v.lista = true;
+      const nuevos = s.nuevosPendientes().length;
+      if (nuevos) {
+        // Ya había terminado y, con la página abierta, quien comparte ha añadido archivos.
+        const otros = s.archivos.some((a) => !a.error && a.estado !== 'hecho' && !s.anadidos.has(a.id));
+        v.avance = {
+          cifras: `Han añadido ${plural(nuevos, 'archivo', 'archivos')}`, pct, punto: 'espera',
+          detalle: 'Quien comparte ha añadido archivos después de que terminaras. Se guardan en la misma carpeta; si el navegador vuelve a pedirla, elige la misma. Lo que ya tienes no se descarga de nuevo ni se mueve.',
+        };
+        v.acciones = [{ id: 'descargar-nuevo', texto: 'Descargar lo nuevo', tipo: 'lleno', ico: 'baja' }];
+        if (otros) v.acciones.push(todo('tonal'));
+        if (s.nombreCarpeta) v.pie = `Lo que ya descargaste sigue en la carpeta «${s.nombreCarpeta}»` + (s.destino ? `, dentro de «${s.destino}»` : '') + '.';
+        v.anuncio = `${v.avance.cifras}.`;
+        v.tituloPagina = `Archivos nuevos · ${nombre} — Lata`;
+        break;
+      }
       v.avance = {
-        cifras: `${tam(t.bytesTotal)} en ${plural(t.elegidos, 'archivo', 'archivos')}`, pct: 0, punto: '',
-        detalle: `Elige una carpeta nueva en un disco con al menos ${tam(t.bytesTotal)} libres. Los archivos se descargan solos y, si la conexión se corta o cierras la pestaña, la descarga continúa donde iba.`,
+        cifras: `${tam(t.bytesTotal)} en ${plural(t.elegidos, 'archivo', 'archivos')}`, pct, punto: '',
+        detalle: `Descárgalo todo de una vez, o solo un archivo con el botón que tiene en la lista. Para todo hacen falta ${tam(t.bytesTotal)} libres en el disco.`,
       };
-      if (s.pideCarpeta) v.avance.detalle = 'Para descargar lo que has añadido, elige otra vez la carpeta (la misma, para aprovechar lo que ya está). Al terminar, la página deja de tener acceso a ella.';
-      else if (s.completadaAntes) v.avance.detalle = 'Este navegador recuerda que ya terminaste esta descarga. Si quieres comprobarla o volver a bajar algo, elige la misma carpeta: lo que ya esté no se descarga otra vez.';
-      v.acciones = [{ id: 'elegir-carpeta', texto: 'Elegir carpeta y descargar', tipo: 'lleno', ico: 'carpeta', desactivado: t.elegidos === 0 }, elegir];
-      v.nota = 'El navegador te pedirá permiso para guardar en la carpeta que elijas: acéptalo. Mejor una carpeta nueva y vacía, y recuerda dónde está: después la página solo puede enseñarte su nombre, no la ruta completa.';
+      if (s.colaVacia === 'retirado') {
+        v.avance.detalle = s.retiradosEnCarpeta.size > 0
+          ? 'Quien comparte ha retirado lo que estabas bajando. Lo que ya estaba descargado sigue en tu carpeta: Lata no lo borra. Puedes bajar otro archivo con su botón, o descargarlo todo.'
+          : 'Quien comparte ha retirado lo que estabas bajando, así que no se ha descargado nada. Puedes bajar otro archivo con su botón, o descargarlo todo.';
+        v.anuncio = 'Quien comparte ha retirado lo que estabas bajando.';
+      } else if (s.colaVacia) v.avance.detalle = 'No queda nada en la cola y no se ha descargado nada. Puedes bajar un archivo con su botón, o descargarlo todo.';
+      else if (s.finPrevio) v.avance.detalle = 'Algún archivo ha cambiado desde que terminaste. Se guarda en la misma carpeta; si el navegador vuelve a pedirla, elige la misma. Lo que ya tienes no se descarga de nuevo.';
+      else if (s.completadaAntes) {
+        v.avance.detalle = s.seleccion.todo
+          ? 'Este navegador recuerda que ya terminaste esta descarga. Si quieres comprobarla o volver a bajar algo, elige la misma carpeta: lo que ya esté no se descarga otra vez.'
+          : 'Este navegador recuerda que ya bajaste algunos de estos archivos. Si eliges la misma carpeta, lo que ya esté no se descarga otra vez.';
+      }
+      v.acciones = [{ ...todo('lleno'), desactivado: t.validos === 0 }];
+      if (s.finPrevio || s.colaVacia) break;   // esta pestaña ya tiene carpeta: no hace falta explicar cómo elegirla
+      v.nota = 'Se guardará en la carpeta que elijas. Continúa sola si se corta. El navegador te pedirá permiso para guardar en ella: acéptalo. Mejor una carpeta nueva y vacía, y recuerda dónde está: después la página solo puede enseñarte su nombre, no la ruta completa.';
       v.pie = 'No hay que instalar nada: los archivos se descifran en tu navegador y se guardan en la carpeta que elijas.';
       break;
+    }
     case 'permiso':
       v.anillo = pct;
       v.lista = true;
@@ -300,7 +333,8 @@ function vista(s) {
         else partes.push('Conectando…');
         partes.push(t.verificados === 1 ? '1 archivo verificado' : `${num(t.verificados)} archivos verificados`);
         v.avance = { cifras, pct, punto: 'vivo', detalle: partes.join(' · ') };
-        v.acciones = [{ id: 'pausar', texto: 'Pausar', tipo: 'lleno', ico: 'pausa' }, elegir];
+        v.acciones = [{ id: 'pausar', texto: 'Pausar', tipo: 'lleno', ico: 'pausa' }];
+        if (parcial) v.acciones.push(todo('tonal'));
         v.anuncio = 'Descargando.';
         v.tituloPagina = `${pct} % · ${nombre} — Lata`;
       }
@@ -310,7 +344,8 @@ function vista(s) {
       v.anillo = pct;
       v.lista = true;
       v.avance = { cifras, pct, punto: 'pausa', detalle: 'En pausa. Lo descargado está guardado. Pulsa «Reanudar» para continuar donde iba.' };
-      v.acciones = [{ id: 'reanudar', texto: 'Reanudar', tipo: 'lleno', ico: 'seguir' }, elegir];
+      v.acciones = [{ id: 'reanudar', texto: 'Reanudar', tipo: 'lleno', ico: 'seguir' }];
+      if (parcial) v.acciones.push(todo('tonal'));
       v.anuncio = 'Descarga en pausa.';
       v.tituloPagina = `En pausa · ${pct} % · ${nombre} — Lata`;
       break;
@@ -331,7 +366,7 @@ function vista(s) {
       break;
     }
     case 'completado': {
-      const r = s.resumen || { archivos: t.hechos, bytes: t.bytesGuardados, ms: 0, verificados: t.verificados, yaEstaban: t.yaEstaban, errores: t.errores, parcial };
+      const r = s.resumen || { archivos: t.hechos, bytes: t.bytesGuardados, ms: 0, verificados: t.verificados, yaEstaban: t.yaEstaban, errores: t.errores };
       v.sobre = 'Descarga completa';
       v.anillo = 100;
       v.lista = true;
@@ -343,13 +378,19 @@ function vista(s) {
         if (r.yaEstaban > 0) frases.push(`${r.yaEstaban === 1 ? '1 archivo ya estaba' : num(r.yaEstaban) + ' archivos ya estaban'} en la carpeta con el tamaño correcto y no se ${r.yaEstaban === 1 ? 'ha' : 'han'} vuelto a comprobar.`);
       }
       if (r.errores > 0) frases.push(`${r.errores === 1 ? '1 archivo no se pudo' : num(r.errores) + ' archivos no se pudieron'} guardar: están marcados en la lista.`);
-      if (s.restos > 0) frases.push('Quedan partes a medias de archivos que no elegiste (en «.lata-partes»): se aprovechan si los eliges más adelante; si no, puedes borrar esa carpeta.');
+      const idos = s.retiradosEnCarpeta.size;
+      if (idos > 0) frases.push(idos === 1 ? '1 archivo que ya tenías descargado ya no se comparte: sigue en tu carpeta, Lata no lo borra.' : `${num(idos)} archivos que ya tenías descargados ya no se comparten: siguen en tu carpeta, Lata no los borra.`);
+      if (s.restos > 0) frases.push('Quedan partes a medias de archivos que no has descargado (en «.lata-partes»): se aprovechan si los descargas más adelante; si no, puedes borrar esa carpeta.');
       v.avance = {
         cifras: `${plural(r.archivos, 'archivo', 'archivos')} · ${tam(r.bytes)}` + (r.ms >= 1000 ? ` · ${duracion(r.ms)}` : ''),
         pct: 100, punto: r.errores ? 'error' : 'ok', detalle: frases.join(' '),
       };
-      if (r.parcial) v.acciones.push({ id: 'elegir-archivos', texto: 'Elegir más archivos', tipo: 'tonal' });
-      v.pie = `Ya puedes cerrar esta pestaña. Los archivos están en la carpeta «${s.nombreCarpeta}»` + (s.destino ? `, dentro de «${s.destino}»` : '') + '. La página ya no tiene acceso a ella.';
+      // Queda algo sin bajar (se eligieron solo algunos archivos): el botón principal sigue ahí.
+      if (s.archivos.some((a) => !a.error && a.estado !== 'hecho')) {
+        v.acciones.push(todo('lleno'));
+        v.nota = 'Lo que bajes ahora se guarda en la misma carpeta; si el navegador vuelve a pedirla, elige la misma. Lo que ya está no se descarga de nuevo.';
+      }
+      v.pie = `Ya puedes cerrar esta pestaña. Los archivos están en la carpeta «${s.nombreCarpeta}»` + (s.destino ? `, dentro de «${s.destino}»` : '') + '. Al cerrarla, la página deja de tener acceso a esa carpeta.';
       v.anuncio = 'Descarga completa.';
       v.tituloPagina = `Completado · ${nombre} — Lata`;
       break;
@@ -360,7 +401,12 @@ function vista(s) {
 }
 
 // Estado de una fila: palabra de estado arriba y tamaño o avance debajo (a la derecha de la fila).
-function estadoFila(a, s) {
+// `accion` es lo que ofrece el botón de la fila: 'descargar', 'quitar' (de la cola) o '' (sin botón).
+export function estadoFila(a, s) {
+  return { ...estadoDe(a, s), accion: s.accionFila(a) };
+}
+
+function estadoDe(a, s) {
   const visual = Math.min(a.tam, a.guardados + a.bytesAbiertos + a.bytesVuelo);
   const pct = porcentaje(visual, a.tam);
   if (a.error) return { clase: 'fallo', ico: 'alerta', l1: 'Error', l2: a.errorCorto || 'No se pudo guardar', nota: a.error };
@@ -368,7 +414,8 @@ function estadoFila(a, s) {
     if (a.verificado) return { clase: 'hecho', ico: 'ok', l1: 'Verificado', l2: tam(a.tam) };
     return { clase: 'hecho', ico: 'ok', l1: 'Ya estaba', l2: tam(a.tam), nota: 'Ya estaba en la carpeta con el tamaño correcto; no se ha vuelto a comprobar' };
   }
-  if (!a.elegido) return { clase: 'fuera', ico: 'menos', l1: 'No elegido', l2: tam(a.tam) };
+  // Disponible: no está en la cola (o aún no hay carpeta, y por tanto tampoco cola).
+  if (!a.elegido || s.fase === 'listo') return { clase: 'libre', ico: 'archivo', l1: a.cambiado ? 'Cambió' : a.nuevo ? 'Nuevo' : '', l2: tam(a.tam) };
   // Recordado por este navegador, pero todavía sin mirar la carpeta: estado neutro, nunca «Verificado».
   if (a.recordado) return { clase: 'cola', ico: 'cola', l1: 'Por comprobar', l2: tam(a.tam), nota: 'Este navegador recuerda haberlo descargado; se comprueba en la carpeta al continuar' };
   if (a.estado === 'ensamblando') return { clase: 'bajando', ico: 'guardar', l1: 'Guardando', l2: tam(a.tam), barra: Math.round((a.pctEnsamblado || 0) * 100) };
@@ -465,6 +512,8 @@ export function crearInterfaz(sesion, extras = {}) {
     b.disabled = true;
     try { await fn(); } finally { b.disabled = b.dataset.desactivado === '1'; pintar(); }
   });
+  acciones['descargar-todo'] = () => s.descargarTodo();
+  acciones['descargar-nuevo'] = () => s.descargarNuevo();
   acciones['elegir-carpeta'] = () => s.elegirCarpeta();
   acciones.permiso = () => s.concederPermiso();
   acciones.pausar = () => s.pausar();
@@ -474,7 +523,6 @@ export function crearInterfaz(sesion, extras = {}) {
   acciones['colision-subcarpeta'] = () => s.resolverColision('subcarpeta');
   acciones['colision-reemplazar'] = () => s.resolverColision('reemplazar');
   acciones.recargar = () => location.reload();
-  acciones['elegir-archivos'] = () => abrirSeleccion();
   acciones['copiar-enlace'] = async () => {
     try {
       await navigator.clipboard.writeText(location.href);
@@ -576,7 +624,6 @@ export function crearInterfaz(sesion, extras = {}) {
 
   /* ---------- lista ---------- */
   const lista = { q: '', orden: 'nombre', ocultar: false, limite: 200, filas: [], firma: '' };
-  const colator = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
 
   function visibles() {
     const q = lista.q;
@@ -597,16 +644,35 @@ export function crearInterfaz(sesion, extras = {}) {
     const est = el('span', { class: 'est' });
     const b = el('b');
     const span = el('span');
-    const li = el('li', null, est, el('div', null, nom, mini), el('div', { class: 'lado' }, b, span));
+    // Botón de la fila: descargar este archivo o quitarlo de la cola. Oculto cuando no ofrece nada.
+    const circulo = el('span');
+    const boton = el('button', { type: 'button', class: 'btn-fila', 'data-id': String(a.id), hidden: true }, circulo);
+    const li = el('li', null, est, el('div', null, nom, mini), el('div', { class: 'lado' }, b, span), boton);
     if (n < 12) { li.classList.add('entra'); li.style.setProperty('--i', String(n)); }
-    return { a, li, est, nom, mini, relleno, b, span, firma: '', ico: '', entra: n < 12 };
+    return { a, li, est, nom, mini, relleno, b, span, boton, circulo, firma: '', ico: '', accion: '', entra: n < 12 };
   }
+
+  const BOTON_FILA = {
+    descargar: { ico: 'baja', titulo: 'Descargar', nombre: (ruta) => `Descargar ${ruta}` },
+    quitar: { ico: 'quitar', titulo: 'Quitar de la cola', nombre: (ruta) => `Quitar ${ruta} de la cola` },
+  };
 
   function actualizarFila(f) {
     const e = estadoFila(f.a, s);
-    const firma = `${e.clase}|${e.ico}|${e.l1}|${e.l2}|${e.barra === undefined ? -1 : e.barra}`;
+    const firma = `${e.clase}|${e.ico}|${e.l1}|${e.l2}|${e.barra === undefined ? -1 : e.barra}|${e.accion}`;
     if (firma === f.firma) return;
     f.firma = firma;
+    if (f.accion !== e.accion) {
+      f.accion = e.accion;
+      const bf = BOTON_FILA[e.accion];
+      f.boton.hidden = !bf;
+      if (bf) {
+        f.boton.className = 'btn-fila ' + e.accion;
+        f.boton.title = bf.titulo;
+        f.boton.setAttribute('aria-label', bf.nombre(f.a.ruta));   // como atributo: el nombre nunca se interpreta como HTML
+        f.circulo.replaceChildren(icono(bf.ico));
+      }
+    }
     f.li.className = e.clase + (f.entra ? ' entra' : '');
     if (f.ico !== e.ico) { f.ico = e.ico; f.est.replaceChildren(icono(e.ico)); }
     f.b.textContent = e.l1;
@@ -624,6 +690,8 @@ export function crearInterfaz(sesion, extras = {}) {
       lista.firma = firma;
       const v = visibles();
       const ul = $('lista');
+      // Al rehacer las filas, el foco del teclado se queda en el botón de la misma fila (si lo sigue teniendo).
+      const conFoco = ul.contains(document.activeElement) ? document.activeElement.dataset.id : undefined;
       lista.filas = v.slice(0, lista.limite).map((a, n) => crearFila(a, primera ? n : 99));
       if (lista.filas.length) ul.replaceChildren(...lista.filas.map((f) => f.li));
       else {
@@ -635,9 +703,27 @@ export function crearInterfaz(sesion, extras = {}) {
       mas.hidden = v.length <= lista.limite;
       if (!mas.hidden) mas.textContent = `Mostrar más (quedan ${num(v.length - lista.limite)})`;
       $('herramientas').hidden = s.archivos.length < 2;
+      for (const f of lista.filas) actualizarFila(f);
+      const fila = conFoco === undefined ? null : lista.filas.find((f) => String(f.a.id) === conFoco);
+      if (fila && !fila.boton.hidden) fila.boton.focus();
+      return;
     }
     for (const f of lista.filas) actualizarFila(f);
   }
+
+  // Un clic en el botón de una fila. La fila cambia en el mismo instante (en cola, o fuera de ella); un
+  // segundo clic seguido sobre la misma fila (doble clic por costumbre) no deshace lo que hizo el primero.
+  const ultimoClic = { id: '', t: 0 };
+  $('lista').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button.btn-fila');
+    if (!b || b.hidden) return;
+    const ahora = performance.now();
+    if (ultimoClic.id === b.dataset.id && ahora - ultimoClic.t < 400) return;
+    ultimoClic.id = b.dataset.id;
+    ultimoClic.t = ahora;
+    s.alternarArchivo(Number(b.dataset.id)).finally(pintar);
+    pintar();
+  });
 
   $('buscar').addEventListener('input', () => { lista.q = $('buscar').value.trim().toLowerCase(); lista.limite = 200; pintarLista(); });
   for (const b of document.querySelectorAll('.filtro[data-orden]')) {
@@ -653,149 +739,6 @@ export function crearInterfaz(sesion, extras = {}) {
     pintarLista();
   });
   $('mas').addEventListener('click', () => { lista.limite += 500; pintarLista(); });
-
-  /* ---------- elegir archivos ---------- */
-  const sel = { ids: new Set(), raiz: null, controles: [], q: '' };
-
-  function construirArbol() {
-    const raiz = { nombre: '', carpetas: new Map(), archivos: [], todos: [], tam: 0, abierta: true };
-    for (const a of s.archivos) {
-      const partes = a.ruta.split('/');
-      let nodo = raiz;
-      const cadena = [raiz];
-      for (let i = 0; i < partes.length - 1; i++) {
-        let h = nodo.carpetas.get(partes[i]);
-        if (!h) { h = { nombre: partes[i], carpetas: new Map(), archivos: [], todos: [], tam: 0, abierta: false }; nodo.carpetas.set(partes[i], h); }
-        nodo = h;
-        cadena.push(h);
-      }
-      nodo.archivos.push(a);
-      if (!a.error) for (const c of cadena) { c.todos.push(a); c.tam += a.tam; }
-    }
-    // Si arriba solo hay una carpeta, se enseña ya abierta.
-    if (raiz.carpetas.size === 1 && raiz.archivos.length === 0) raiz.carpetas.values().next().value.abierta = true;
-    return raiz;
-  }
-
-  function refrescarSeleccion() {
-    for (const c of sel.controles) {
-      if (c.archivo) c.input.checked = sel.ids.has(c.archivo.id);
-      else {
-        const n = c.nodo.todos.reduce((k, a) => k + (sel.ids.has(a.id) ? 1 : 0), 0);
-        c.input.checked = n > 0 && n === c.nodo.todos.length;
-        c.input.indeterminate = n > 0 && n < c.nodo.todos.length;
-      }
-    }
-    let n = 0;
-    let b = 0;
-    for (const a of sel.raiz.todos) if (sel.ids.has(a.id)) { n++; b += a.tam; }
-    $('sel-resumen').textContent = n ? `Elegidos: ${plural(n, 'archivo', 'archivos')} · ${tam(b)}` : 'Marca al menos un archivo';
-    $('sel-aplicar').disabled = n === 0;
-  }
-
-  function nodoArchivo(a) {
-    const input = el('input', { type: 'checkbox', class: 'casilla' });
-    input.disabled = !!a.error;
-    input.addEventListener('change', () => {
-      if (input.checked) sel.ids.add(a.id); else sel.ids.delete(a.id);
-      refrescarSeleccion();
-    });
-    if (!a.error) sel.controles.push({ archivo: a, input });
-    const nombre = sel.q ? a.ruta : a.ruta.slice(a.ruta.lastIndexOf('/') + 1);
-    return el('li', null, el('div', { class: 'nodo' + (a.error ? ' deshabilitado' : ''), title: a.error || a.ruta },
-      el('label', null, input, el('span', { class: 'nombre', text: nombre }), el('span', { class: 'sel-meta', text: tam(a.tam) }))));
-  }
-
-  function nodoCarpeta(nodo) {
-    const input = el('input', { type: 'checkbox', class: 'casilla' });
-    input.disabled = nodo.todos.length === 0;
-    input.addEventListener('change', () => {
-      for (const a of nodo.todos) { if (input.checked) sel.ids.add(a.id); else sel.ids.delete(a.id); }
-      refrescarSeleccion();
-    });
-    sel.controles.push({ nodo, input });
-    const plegar = el('button', { type: 'button', class: 'plegar', 'aria-expanded': nodo.abierta ? 'true' : 'false', 'aria-label': `Mostrar u ocultar el contenido de ${nodo.nombre}` }, icono('flecha'));
-    const hijos = el('ul');
-    hijos.hidden = !nodo.abierta;
-    let pintados = false;
-    const pintarHijos = () => {
-      if (pintados) return;
-      pintados = true;
-      llenar(hijos, nodo);
-      refrescarSeleccion();
-    };
-    if (nodo.abierta) { pintados = true; llenar(hijos, nodo); }
-    plegar.addEventListener('click', () => {
-      nodo.abierta = !nodo.abierta;
-      plegar.setAttribute('aria-expanded', nodo.abierta ? 'true' : 'false');
-      hijos.hidden = !nodo.abierta;
-      if (nodo.abierta) pintarHijos();
-    });
-    return el('li', null,
-      el('div', { class: 'nodo carpeta' }, plegar,
-        el('label', null, input, el('span', { class: 'nombre', text: nodo.nombre }), el('span', { class: 'sel-meta', text: `${plural(nodo.todos.length, 'archivo', 'archivos')} · ${tam(nodo.tam)}` }))),
-      hijos);
-  }
-
-  // Pinta los hijos de una carpeta, por tandas si son muchos.
-  function llenar(ul, nodo) {
-    const carpetas = [...nodo.carpetas.values()].sort((x, y) => colator.compare(x.nombre, y.nombre));
-    for (const c of carpetas) ul.append(nodoCarpeta(c));
-    let n = 0;
-    const tanda = () => {
-      const hasta = Math.min(nodo.archivos.length, n + 300);
-      const boton = ul.querySelector(':scope > li.mas-nodos');
-      if (boton) boton.remove();
-      for (; n < hasta; n++) ul.append(nodoArchivo(nodo.archivos[n]));
-      if (n < nodo.archivos.length) {
-        const b = el('button', { type: 'button', class: 'btn texto', text: `Mostrar más (quedan ${num(nodo.archivos.length - n)})` });
-        b.addEventListener('click', () => { tanda(); refrescarSeleccion(); });
-        ul.append(el('li', { class: 'mas-nodos' }, b));
-      }
-    };
-    tanda();
-  }
-
-  function pintarArbol() {
-    sel.controles = [{ nodo: sel.raiz, input: $('sel-todo') }];
-    const caja = $('sel-arbol');
-    const ul = el('ul');
-    if (sel.q) {
-      const hallados = s.archivos.filter((a) => a.ruta.toLowerCase().includes(sel.q));
-      for (const a of hallados.slice(0, 300)) ul.append(nodoArchivo(a));
-      if (!hallados.length) ul.append(el('li', { class: 'vacio', text: `Ningún archivo coincide con «${sel.q}».` }));
-      else if (hallados.length > 300) ul.append(el('li', { class: 'vacio', text: `Hay ${num(hallados.length - 300)} más. Escribe algo más para afinar.` }));
-    } else {
-      llenar(ul, sel.raiz);
-    }
-    caja.replaceChildren(ul);
-    $('sel-todo-meta').textContent = `${plural(sel.raiz.todos.length, 'archivo', 'archivos')} · ${tam(sel.raiz.tam)}`;
-    refrescarSeleccion();
-  }
-
-  function abrirSeleccion() {
-    sel.ids = new Set(s.archivos.filter((a) => a.elegido && !a.error).map((a) => a.id));
-    sel.raiz = construirArbol();
-    sel.q = '';
-    $('sel-buscar').value = '';
-    $('sel-aplicar').textContent = s.carpeta ? 'Aplicar' : 'Listo';
-    pintarArbol();
-    const d = $('dlg-archivos');
-    if (!d.open) d.showModal();
-  }
-  $('sel-todo').addEventListener('change', () => {
-    const marcar = $('sel-todo').checked;
-    for (const a of sel.raiz.todos) { if (marcar) sel.ids.add(a.id); else sel.ids.delete(a.id); }
-    refrescarSeleccion();
-  });
-  $('sel-buscar').addEventListener('input', () => { sel.q = $('sel-buscar').value.trim().toLowerCase(); pintarArbol(); });
-  $('sel-cancelar').addEventListener('click', () => $('dlg-archivos').close());
-  $('sel-aplicar').addEventListener('click', () => {
-    if (!sel.ids.size) return;
-    $('dlg-archivos').close();
-    s.cambiarSeleccion(sel.ids);
-    pintar();
-  });
 
   /* ---------- repintado ---------- */
   function pintarYa() {
@@ -814,5 +757,5 @@ export function crearInterfaz(sesion, extras = {}) {
     setTimeout(hacer, 700); // con la pestaña oculta no hay fotogramas, pero el título debe seguir al día
   }
 
-  return { pintar, pintarYa, avisar, dialogo, abrirSeleccion };
+  return { pintar, pintarYa, avisar, dialogo };
 }

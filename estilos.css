@@ -199,7 +199,6 @@ h1 { margin: 0; font-size: clamp(26px, 6vw, 40px); line-height: 1.12; font-weigh
 .buscar:focus-within { outline: 2px solid var(--ac); outline-offset: 2px; }
 .buscar input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; color: var(--tx); font-size: 15px; }
 .buscar input::placeholder { color: var(--mut); opacity: 1; }
-.buscar.en-dialogo { background: var(--sup2); box-shadow: none; }
 .filtros { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
 .filtros .sep { width: 1px; height: 20px; background: var(--linea); margin: 0 2px; }
 .filtro {
@@ -211,8 +210,8 @@ h1 { margin: 0; font-size: clamp(26px, 6vw, 40px); line-height: 1.12; font-weigh
 .filtro[aria-pressed="true"] { background: var(--ac-suave); color: var(--ac); }
 
 ul.lista { list-style: none; margin: 0; padding: 6px; background: var(--sup); border-radius: var(--r); box-shadow: var(--sombra); transition: background-color .3s var(--estandar); }
-/* Fila: icono de estado | nombre (y barra si está bajando) | estado y tamaño a la derecha */
-ul.lista li { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 12px 12px 8px; border-radius: calc(var(--r) - 8px); }
+/* Fila: icono de estado | nombre (y barra si está bajando) | estado y tamaño | botón de la fila */
+ul.lista li { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto 40px; gap: 12px; align-items: center; padding: 12px 12px 12px 8px; border-radius: calc(var(--r) - 8px); }
 ul.lista li + li { border-top: 1px solid var(--linea); border-top-left-radius: 0; border-top-right-radius: 0; }
 ul.lista li.vacio { display: block; padding: 22px 16px; text-align: center; color: var(--mut); }
 .est { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--sup2); color: var(--mut); }
@@ -227,15 +226,34 @@ li.atento .est { background: color-mix(in srgb, var(--aviso) 16%, transparent); 
 .nom .barra { flex: none; color: var(--mut); }
 .nom .arch { flex: 0 0 auto; max-width: calc(100% - 3ch); }
 .nom .arch:first-child { max-width: 100%; }
-li.fuera .nom { color: var(--mut); }
 .lado { display: grid; justify-items: end; gap: 1px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .lado b { font-size: 14.5px; font-weight: 650; }
 .lado span { font-size: 13px; color: var(--mut); }
 li.hecho .lado b { color: var(--ok); }
 li.bajando .lado b { color: var(--ac); }
-li.cola .lado b, li.fuera .lado b { color: var(--mut); font-weight: 600; }
+li.cola .lado b, li.libre .lado b { color: var(--mut); font-weight: 600; }
 li.fallo .lado b { color: var(--pel); }
 li.atento .lado b { color: var(--aviso); }
+.lado b:empty { display: none; }
+/* Botón de la fila (descargar ese archivo, o quitarlo de la cola): un círculo de 40 px con tinte y borde
+   fino, dentro de una zona pulsable de 48 px. El margen negativo mete esa zona en el relleno de la fila
+   para no hacerla más alta. Los dos estados se distinguen por el icono, no solo por el color. */
+.btn-fila {
+  display: grid; place-items: center; width: 48px; height: 48px; margin: -4px; padding: 0; border: 0; border-radius: 50%;
+  background: none; color: var(--ac); cursor: pointer;
+}
+.btn-fila span {
+  display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--ac-suave);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ac) 45%, transparent);
+  transition: transform .15s var(--estandar), background-color .15s var(--estandar), color .15s var(--estandar);
+}
+.btn-fila:hover span { background: color-mix(in srgb, var(--ac) 24%, transparent); }
+.btn-fila:active span { transform: scale(.92); }
+.btn-fila:focus-visible { outline-offset: -2px; }
+.btn-fila.quitar { color: var(--mut); }
+.btn-fila.quitar span { background: none; box-shadow: inset 0 0 0 1px var(--mut); }
+.btn-fila.quitar:hover { color: var(--tx); }
+.btn-fila.quitar:hover span { background: color-mix(in srgb, var(--tx) 8%, transparent); }
 .mas { display: flex; justify-content: center; margin-top: 8px; }
 .pie { margin: 16px 4px 0; color: var(--mut); font-size: 14px; }
 .pie:empty { display: none; }
@@ -250,41 +268,12 @@ li.atento .lado b { color: var(--aviso); }
   background: var(--sup); color: var(--tx); box-shadow: 0 30px 80px -20px rgba(0, 0, 0, .7), 0 0 0 1px var(--linea);
 }
 .dialogo[open] { display: flex; flex-direction: column; animation: sube .3s var(--desacelera); }
-.dialogo.ancho { width: min(600px, calc(100vw - 32px)); }
 .dialogo::backdrop { background: var(--velo); }
 @keyframes sube { from { opacity: 0; transform: translateY(18px); } }
 .dialogo h2 { margin: 0 0 6px; font-size: 24px; font-weight: 400; letter-spacing: -.3px; }
 .dlg-nota { margin: 0 0 16px; color: var(--mut); font-size: 14.5px; }
 .dlg-pie { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
 .dlg-botones { display: flex; gap: 8px; margin-left: auto; }
-.sel-resumen { color: var(--mut); font-size: 14px; font-variant-numeric: tabular-nums; }
-
-.casilla {
-  -webkit-appearance: none; appearance: none; flex: none; position: relative; margin: 0; cursor: pointer;
-  width: 20px; height: 20px; border: 2px solid var(--mut); border-radius: 6px; background: transparent;
-  transition: background-color .15s var(--estandar), border-color .15s var(--estandar);
-}
-.casilla:checked, .casilla:indeterminate { background: var(--ac); border-color: var(--ac); }
-.casilla:checked::after { content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 10px; border: solid var(--on-ac); border-width: 0 2px 2px 0; transform: rotate(45deg); }
-.casilla:indeterminate::after { content: ""; position: absolute; left: 3px; right: 3px; top: 7px; height: 2px; background: var(--on-ac); }
-.casilla:disabled { opacity: .4; cursor: default; }
-
-.sel-todo { display: flex; align-items: center; gap: 12px; padding: 14px 10px 12px; font-weight: 650; cursor: pointer; border-bottom: 1px solid var(--linea); }
-.sel-meta { margin-left: auto; color: var(--mut); font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.arbol { flex: 1 1 auto; min-height: 120px; overflow: auto; margin: 0 -8px; padding: 4px 8px; overscroll-behavior: contain; }
-.arbol ul { list-style: none; margin: 0; padding: 0; }
-.arbol ul ul { margin-left: 15px; padding-left: 13px; border-left: 1px solid var(--linea); }
-.nodo { display: flex; align-items: center; gap: 4px; min-height: 42px; border-radius: 12px; padding: 0 4px 0 2px; }
-.nodo:hover { background: color-mix(in srgb, var(--tx) 5%, transparent); }
-.nodo label { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; padding: 8px 6px; cursor: pointer; }
-.nodo .nombre { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 13.5px; }
-.nodo.carpeta .nombre { font-family: inherit; font-size: 15px; font-weight: 600; }
-.nodo .sel-meta { margin-left: 0; }
-.nodo.deshabilitado .nombre { color: var(--mut); text-decoration: line-through; }
-.plegar { display: grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--mut); cursor: pointer; }
-.plegar svg { transition: transform .2s var(--estandar); }
-.plegar[aria-expanded="true"] svg { transform: rotate(90deg); }
-.arbol .vacio { padding: 20px 8px; color: var(--mut); text-align: center; }
 
 /* ---------- Aviso flotante ---------- */
 .aviso-flotante {
@@ -306,7 +295,8 @@ li.atento .lado b { color: var(--aviso); }
   .tarjeta { padding: 18px 16px; }
   .fila span { font-size: 17px; }
   .dialogo { padding: 20px 16px; }
-  ul.lista li { gap: 10px; padding-right: 10px; }
+  ul.lista li { grid-template-columns: 34px minmax(0, 1fr) auto 40px; gap: 8px; padding-right: 10px; }
+  ul.lista .est { width: 34px; height: 34px; }
   .lado b { font-size: 14px; }
   .lado span { font-size: 12.5px; }
   .dlg-botones { width: 100%; justify-content: flex-end; }
@@ -316,7 +306,6 @@ li.atento .lado b { color: var(--aviso); }
   .chip span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .chip { padding: 0; width: 32px; justify-content: center; }
   .acciones .btn { flex: 1 1 auto; }
-  .nodo .sel-meta { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

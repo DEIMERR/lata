@@ -61,6 +61,7 @@ export class Descarga {
     this.colaEnsamblado = [];
     this.ensamblando = null;
     this.finAvisado = false;
+    this.abortos = new Set();       // unidades canceladas cuyo descarte en la carpeta aún no ha terminado
     this.fallosTrozo = new Map();
     this.fallosTrabajador = 0;
     this.fallosRed = 0;             // intentos seguidos que acabaron sin respuesta del motor (fallo de red, no un estado HTTP)
@@ -597,11 +598,28 @@ export class Descarga {
     if (u.cancelada) return;
     u.cancelada = true;
     for (const t of [...this.trabajos.values()]) if (t.u === u && t.fase === 'red') this.cancelarTrabajo(t, false);
-    Promise.resolve(u.abierto).then((f) => f.abortar(), () => {});
+    const fin = Promise.resolve(u.abierto).then((f) => f.abortar(), () => false).then((entero) => {
+      // El aborto llegó con el cierre de un archivo final en marcha y ese cierre terminó bien: el
+      // archivo está entero en la carpeta y no se ha borrado. Cuenta como descargado, no como cortado.
+      if (entero === true && !u.a.geo.ensambla && u.a.estado === 'cola') {
+        u.a.hechas.add(u.k);
+        this.completar(u.a);
+        this.cambio();
+      }
+    }).catch(() => {});
+    this.abortos.add(fin);
+    fin.then(() => this.abortos.delete(fin));
     const n = this.unidades.indexOf(u);
     if (n >= 0) this.unidades.splice(n, 1);
     u.a.activas.delete(u.k);
     u.a.bytesAbiertos = Math.max(0, u.a.bytesAbiertos - u.bytes);
+  }
+
+  // Se cumple cuando lo cancelado hasta ahora ya está descartado en la carpeta (flujos abortados y sus
+  // archivos de 0 bytes quitados). Quien vaya a borrar después las partes de un archivo espera a esto,
+  // para no encontrarse una parte todavía abierta.
+  enCalma() {
+    return Promise.all([...this.abortos]);
   }
 
   // Descarta lo que haya abierto de un archivo (dejó de estar elegido, cambió en el origen, o dio error).
